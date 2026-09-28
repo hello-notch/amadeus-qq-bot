@@ -57,7 +57,7 @@ async def _set_override(event, arguments: Message, disabled: bool, matcher) -> N
     if spec is None or spec.permission != PermissionLevel.EVERYONE:
         await matcher.finish("请输入一个原权限为 EVERYONE 的命令。")
     get_container().repository.set_command_override(group_id, spec.name, disabled, event.get_user_id())
-    await matcher.finish(f"/{spec.name} 已{'关闭' if disabled else '开启'}（当前群）。")
+    await matcher.finish(f"已{'关闭' if disabled else '开启'}/{spec.name}（当前群）。")
 
 
 @enable_command.handle()

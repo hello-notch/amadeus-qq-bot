@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import httpx
 from nonebot import on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, Message
+from nonebot.log import logger
 from nonebot.params import CommandArg
 from nonebot.rule import to_me
 
@@ -153,7 +154,8 @@ async def handle_proactive(bot: Bot, event) -> None:
             )
             decision = json.loads(re.search(r"\{[\s\S]*\}", gate.content).group(0))
             should_respond = bool(decision.get("respond")) and float(decision.get("confidence", 0)) >= 0.7
-        except Exception:
+        except Exception as exc:
+            logger.warning("主动接话判定失败：{}", type(exc).__name__)
             return
     if not should_respond:
         return
@@ -208,7 +210,8 @@ async def _respond(matcher, bot: Bot, event, text: str) -> None:
             replied_message_id=reply_message_id(event),
             current_message_id=str(getattr(event, "message_id", "") or "") or None,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("AI 回复失败：{}", type(exc).__name__)
         await matcher.finish("Amadeus 暂时无法连接到 AI 服务，请稍后再试。")
     if silent_after_stick:
         container.repository.append_conversation(

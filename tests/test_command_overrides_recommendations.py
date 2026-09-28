@@ -77,3 +77,35 @@ async def test_disabled_alias_guard_and_help_annotation(tmp_path, monkeypatch):
     assert "SUPERUSER（当前群已关闭）" in help_plugin._format_detail(
         help_plugin.command_registry.get("food"), "10"
     )
+
+
+async def test_override_replies_put_action_before_command(tmp_path, monkeypatch):
+    nonebot.init()
+    from amadeus_bot.plugins import chat, command_overrides
+
+    assert chat
+
+    database = CoreDatabase(tmp_path / "core.sqlite3")
+    database.initialize()
+    repository = CoreRepository(database)
+    container = SimpleNamespace(
+        repository=repository,
+        permissions=SimpleNamespace(role_for=lambda user: PermissionLevel.SUPERUSER),
+    )
+    monkeypatch.setattr(command_overrides, "get_container", lambda: container)
+    event = SimpleNamespace(message_type="group", group_id=10, get_user_id=lambda: "1")
+    from nonebot.adapters.onebot.v11 import Message
+
+    class Finished(Exception):
+        pass
+
+    class Matcher:
+        async def finish(self, text):
+            raise Finished(text)
+
+    import pytest
+
+    with pytest.raises(Finished, match=r"已关闭/chat（当前群）"):
+        await command_overrides._set_override(event, Message("chat"), True, Matcher())
+    with pytest.raises(Finished, match=r"已开启/chat（当前群）"):
+        await command_overrides._set_override(event, Message("chat"), False, Matcher())
