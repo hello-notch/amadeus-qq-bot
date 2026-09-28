@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from nonebot.log import logger
 
 from amadeus_bot.domain.ai import AIResponse, ToolCall
 
@@ -128,6 +129,16 @@ class OpenAICompatibleProvider:
         content = message.get("content") or ""
         tool_calls = tuple(_parse_tool_call(item) for item in message.get("tool_calls") or [])
         usage = data.get("usage") or {}
+        if not str(content).strip() and not tool_calls:
+            details = usage.get("completion_tokens_details") or {}
+            reason = (
+                f"AI provider {self.config.name} returned empty output "
+                f"(finish_reason={choices[0].get('finish_reason')}, "
+                f"completion_tokens={usage.get('completion_tokens')}, "
+                f"reasoning_tokens={details.get('reasoning_tokens')})"
+            )
+            logger.warning("{}", reason)
+            raise RuntimeError(reason)
         prompt_details = usage.get("prompt_tokens_details") or {}
         return AIResponse(
             content=str(content),

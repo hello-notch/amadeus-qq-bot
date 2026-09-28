@@ -169,7 +169,7 @@ class AIService:
         errors: list[str] = []
         targets = dict.fromkeys(
             (route.primary, *route.fallbacks)
-            if task == AITask.VISION
+            if task in {AITask.VISION, AITask.SUMMARY, AITask.STATS_ANALYSIS}
             else (self.current_model(), route.primary, *route.fallbacks)
         )
         for target in targets:

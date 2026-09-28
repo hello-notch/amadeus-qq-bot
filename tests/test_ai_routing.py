@@ -79,6 +79,48 @@ def test_parse_openai_tool_call() -> None:
     assert call.arguments == {"deadline": "明天下午三点"}
 
 
+@pytest.mark.asyncio
+async def test_chat_provider_rejects_reasoning_only_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "", "reasoning_content": "private reasoning"},
+                    }
+                ],
+                "usage": {
+                    "completion_tokens": 1400,
+                    "completion_tokens_details": {"reasoning_tokens": 1400},
+                },
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        ProviderConfig(
+            name="deepseek",
+            credential_host="api.deepseek.com",
+            api_prefix="",
+            models=("deepseek-v4-flash",),
+        ),
+        ApiCredential("https://api.deepseek.com", "test-key"),
+    )
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RuntimeError, match="finish_reason=length.*reasoning_tokens=1400"):
+            await provider.complete(
+                model="deepseek-v4-flash",
+                messages=[{"role": "user", "content": "test"}],
+                temperature=0.2,
+                max_tokens=1400,
+            )
+    finally:
+        await provider.close()
+
+
 def test_responses_input_uses_typed_content_and_replays_output_items() -> None:
     raw_call = {
         "type": "function_call",
@@ -285,6 +327,34 @@ async def test_ai_service_retries_empty_text_with_task_fallback(tmp_path: Path) 
     assert [call.kwargs["model"] for call in service.providers["deepseek"].complete.await_args_list] == [
         "deepseek-v4-flash",
         "deepseek-v4-pro",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_analytics_tasks_skip_active_vision_model(tmp_path: Path) -> None:
+    catalog = AIRouteCatalog.load(ROUTES_PATH)
+    database = CoreDatabase(tmp_path / "core.sqlite3")
+    database.initialize()
+    repository = CoreRepository(database)
+    service = AIService(
+        catalog,
+        {"api.deepseek.com": ApiCredential("https://api.deepseek.com", "test-key")},
+        repository,
+    )
+    service.switch_model("deepseek-v4-flash-vision-exp", "999")
+    completion = AsyncMock(
+        return_value=AIResponse(content="分析完成", provider="deepseek", model="deepseek-v4-flash")
+    )
+    service.providers["deepseek"].complete = completion
+    try:
+        for task in (AITask.STATS_ANALYSIS, AITask.SUMMARY):
+            await service.complete(task, [{"role": "user", "content": "群聊内容"}])
+    finally:
+        await service.close()
+
+    assert [call.kwargs["model"] for call in completion.await_args_list] == [
+        "deepseek-v4-flash",
+        "deepseek-v4-flash",
     ]
 
 

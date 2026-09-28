@@ -33,13 +33,13 @@ max_tokens = 120
 primary = "deepseek/deepseek-v4-flash"
 fallbacks = ["deepseek/deepseek-v4-pro"]
 temperature = 0.2
-max_tokens = 1400
+max_tokens = 4096
 
 [tasks.stats_analysis]
 primary = "deepseek/deepseek-v4-flash"
 fallbacks = ["deepseek/deepseek-v4-pro"]
 temperature = 0.2
-max_tokens = 900
+max_tokens = 4096
 
 [tasks.memory_extraction]
 primary = "deepseek/deepseek-v4-flash"

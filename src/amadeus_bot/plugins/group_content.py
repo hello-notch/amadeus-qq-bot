@@ -99,7 +99,7 @@ async def handle_stats(event, arguments: Message = CommandArg()) -> None:
         await stats_command.finish(f"参数错误：{exc}")
     deterministic = service.deterministic(window, target)
     base = "【确定性统计】\n" + format_deterministic(window, deterministic)
-    transcript = service.ai_transcript(window)
+    transcript = service.ai_transcript(window, max_chars=4_000)
     if deterministic["messages"] < 3 or not transcript:
         await finish_text_or_image(stats_command, base + "\n\n样本不足，未调用 AI 分析。", title="水群统计")
     if target and not get_container().memory.analysis_enabled(target):
@@ -140,7 +140,7 @@ async def handle_summary(event, arguments: Message = CommandArg()) -> None:
         window = service.load_group(group_id, hours)
     except ValueError as exc:
         await summary_command.finish(f"参数错误：{exc}")
-    transcript = service.ai_transcript(window, max_chars=24_000)
+    transcript = service.ai_transcript(window, max_chars=8_000)
     if len(window.effective_records) < 3 or len(transcript) < 30:
         await summary_command.finish("有效消息不足，未调用 AI 总结。")
     prompt = (
