@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections import Counter
 
 from nonebot import on_command, on_message, on_regex
@@ -53,6 +54,9 @@ natural_request = on_regex(
 )
 memory_batch_listener = on_message(priority=90, block=False)
 _message_counts: Counter[tuple[str, str]] = Counter()
+_running_extractions: set[tuple[str, str]] = set()
+_ai_retry_after = 0.0
+_AI_RETRY_DELAY_SECONDS = 300
 
 
 @natural_request.handle()
@@ -101,14 +105,19 @@ async def handle_memory_batch(event) -> None:
     ):
         return
     key = (group_id, user_id)
-    _message_counts[key] += 1
+    _message_counts[key] = min(12, _message_counts[key] + 1)
     if _message_counts[key] < 12:
         return
+    if time.monotonic() < _ai_retry_after or key in _running_extractions:
+        return
     _message_counts[key] = 0
-    asyncio.create_task(_extract_memories(group_id, user_id))
+    _running_extractions.add(key)
+    task = asyncio.create_task(_extract_memories(group_id, user_id))
+    task.add_done_callback(lambda _: _running_extractions.discard(key))
 
 
 async def _extract_memories(group_id: str, user_id: str) -> None:
+    global _ai_retry_after
     container = get_container()
     try:
         window = AnalyticsService(container.paths.logs).load_group(group_id, 24)
@@ -141,6 +150,13 @@ async def _extract_memories(group_id: str, user_id: str) -> None:
                 source_group_id=group_id,
                 evidence_message_ids=tuple(evidence),
             )
+    except RuntimeError as exc:
+        if str(exc).startswith("所有 AI 路由均不可用："):
+            _ai_retry_after = time.monotonic() + _AI_RETRY_DELAY_SECONDS
+            _message_counts[(group_id, user_id)] = 12
+            logger.warning("记忆候选提取暂缓：AI 路由不可用；{} 秒后允许重试", _AI_RETRY_DELAY_SECONDS)
+            return
+        logger.exception("批量记忆候选提取失败")
     except Exception:
         logger.exception("批量记忆候选提取失败")
 
