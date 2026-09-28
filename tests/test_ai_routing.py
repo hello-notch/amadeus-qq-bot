@@ -24,7 +24,7 @@ ROUTES_PATH = Path(__file__).resolve().parents[1] / "config" / "ai_routes.toml"
 def test_route_catalog_assigns_cheap_and_quality_models() -> None:
     catalog = AIRouteCatalog.load(ROUTES_PATH)
 
-    assert catalog.default_model.qualified_name == "huanyan/gpt-5.6-luna"
+    assert catalog.default_model.qualified_name == "deepseek/deepseek-v4-flash"
     assert catalog.routes[AITask.PROACTIVE_GATE].primary.model == "deepseek-v4-flash"
     assert catalog.routes[AITask.VISION].primary.model == "deepseek-v4-flash-vision-exp"
     assert catalog.routes[AITask.CHAT].primary.model == "deepseek-v4-flash"
@@ -34,10 +34,7 @@ def test_route_catalog_assigns_cheap_and_quality_models() -> None:
         "deepseek-v4-pro",
         "deepseek-v4-flash-vision-exp",
     )
-    assert len(catalog.providers["huanyan"].models) == 8
-    assert "gpt-5.6-luna" in catalog.providers["huanyan"].models
-    assert catalog.providers["huanyan"].api_mode == "responses"
-    assert catalog.providers["huanyan"].responses_stream is True
+    assert set(catalog.providers) == {"deepseek"}
 
 
 def test_responses_input_converts_image_url_to_input_image() -> None:
@@ -208,12 +205,11 @@ async def test_ai_service_switches_and_persists_active_model(tmp_path: Path) -> 
     repository = CoreRepository(database)
     credentials = {
         "api.deepseek.com": ApiCredential("https://api.deepseek.com", "test-deepseek"),
-        "api.huanyan.ltd": ApiCredential("https://api.huanyan.ltd/v1", "test-huanyan"),
     }
     service = AIService(catalog, credentials, repository)
     try:
-        assert service.current_model().qualified_name == "huanyan/gpt-5.6-luna"
-        assert len(service.available_models()) == 11
+        assert service.current_model().qualified_name == "deepseek/deepseek-v4-flash"
+        assert len(service.available_models()) == 3
         switched = service.switch_model("deepseek-v4-pro", "999")
         assert switched.qualified_name == "deepseek/deepseek-v4-pro"
     finally:
@@ -225,6 +221,14 @@ async def test_ai_service_switches_and_persists_active_model(tmp_path: Path) -> 
     finally:
         await reopened.close()
 
+    repository.set_runtime_setting("ai.active_model", "huanyan/gpt-5.6-luna", "999")
+    migrated = AIService(catalog, credentials, repository)
+    try:
+        assert migrated.current_model().qualified_name == "deepseek/deepseek-v4-flash"
+        assert {target.provider for target in migrated.available_models()} == {"deepseek"}
+    finally:
+        await migrated.close()
+
 
 @pytest.mark.asyncio
 async def test_ai_service_uses_active_model_before_task_fallback(tmp_path: Path) -> None:
@@ -234,14 +238,15 @@ async def test_ai_service_uses_active_model_before_task_fallback(tmp_path: Path)
     repository = CoreRepository(database)
     credentials = {
         "api.deepseek.com": ApiCredential("https://api.deepseek.com", "test-deepseek"),
-        "api.huanyan.ltd": ApiCredential("https://api.huanyan.ltd/v1", "test-huanyan"),
     }
     service = AIService(catalog, credentials, repository)
-    huanyan_complete = AsyncMock(side_effect=RuntimeError("temporary upstream failure"))
+    service.switch_model("deepseek-v4-pro", "999")
     deepseek_complete = AsyncMock(
-        return_value=AIResponse(content="ok", provider="deepseek", model="deepseek-v4-flash")
+        side_effect=[
+            RuntimeError("temporary upstream failure"),
+            AIResponse(content="ok", provider="deepseek", model="deepseek-v4-flash"),
+        ]
     )
-    service.providers["huanyan"].complete = huanyan_complete
     service.providers["deepseek"].complete = deepseek_complete
     try:
         result = await service.complete(AITask.CHAT, [{"role": "user", "content": "hello"}])
@@ -249,8 +254,10 @@ async def test_ai_service_uses_active_model_before_task_fallback(tmp_path: Path)
         await service.close()
 
     assert result.provider == "deepseek"
-    assert huanyan_complete.await_args.kwargs["model"] == "gpt-5.6-luna"
-    assert deepseek_complete.await_args.kwargs["model"] == "deepseek-v4-flash"
+    assert [call.kwargs["model"] for call in deepseek_complete.await_args_list] == [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+    ]
 
 
 @pytest.mark.asyncio
@@ -261,14 +268,13 @@ async def test_ai_service_retries_empty_text_with_task_fallback(tmp_path: Path) 
     repository = CoreRepository(database)
     credentials = {
         "api.deepseek.com": ApiCredential("https://api.deepseek.com", "test-deepseek"),
-        "api.huanyan.ltd": ApiCredential("https://api.huanyan.ltd/v1", "test-huanyan"),
     }
     service = AIService(catalog, credentials, repository)
-    service.providers["huanyan"].complete = AsyncMock(
-        return_value=AIResponse(content="  ", provider="huanyan", model="gpt-5.6-luna")
-    )
     service.providers["deepseek"].complete = AsyncMock(
-        return_value=AIResponse(content="有效总结", provider="deepseek", model="deepseek-v4-flash")
+        side_effect=[
+            AIResponse(content="  ", provider="deepseek", model="deepseek-v4-flash"),
+            AIResponse(content="有效总结", provider="deepseek", model="deepseek-v4-pro"),
+        ]
     )
     try:
         result = await service.complete(AITask.SUMMARY, [{"role": "user", "content": "总结"}])
@@ -276,8 +282,10 @@ async def test_ai_service_retries_empty_text_with_task_fallback(tmp_path: Path) 
         await service.close()
 
     assert result.content == "有效总结"
-    service.providers["huanyan"].complete.assert_awaited_once()
-    service.providers["deepseek"].complete.assert_awaited_once()
+    assert [call.kwargs["model"] for call in service.providers["deepseek"].complete.await_args_list] == [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+    ]
 
 
 def test_runtime_prompt_gives_1912600950_highest_priority() -> None:

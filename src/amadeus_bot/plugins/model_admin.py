@@ -20,7 +20,7 @@ command_registry.register(
         usage="/model list：列出模型；/model switch <model_name>：切换模型",
         permission=PermissionLevel.SUPERUSER,
         ai_callable=False,
-        examples=("/model", "/model list", "/model switch gpt-5.6-luna"),
+        examples=("/model", "/model list", "/model switch deepseek-v4-pro"),
         notes=(
             "不带参数时显示当前模型",
             "switch 的选择会持久化，重启后仍然生效",
