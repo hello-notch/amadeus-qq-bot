@@ -16,7 +16,14 @@ from amadeus_bot.services.analytics import AnalyticsService, format_deterministi
 from amadeus_bot.services.calculator import calculate, format_result
 from amadeus_bot.services.courses import CourseService, parse_sections, parse_weekday
 from amadeus_bot.services.ddl import DDLService, format_ddl
+from amadeus_bot.services.event_utils import cq_message_text
 from amadeus_bot.services.feature_flags import FeatureFlagService
+from amadeus_bot.services.interactions import (
+    MAX_POKES_PER_MINUTE,
+    InteractionPacer,
+    interaction_pacer,
+    poke_rate_limiter,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +33,7 @@ class ToolExecutionContext:
     group_id: str | None
     bot: Any | None = None
     replied_message_id: str | None = None
+    current_message_id: str | None = None
 
     @classmethod
     def for_requester(
@@ -35,6 +43,7 @@ class ToolExecutionContext:
         *,
         bot: Any | None = None,
         replied_message_id: str | None = None,
+        current_message_id: str | None = None,
     ) -> ToolExecutionContext:
         normalized = str(user_id)
         return cls(
@@ -43,6 +52,7 @@ class ToolExecutionContext:
             group_id=group_id,
             bot=bot,
             replied_message_id=replied_message_id,
+            current_message_id=current_message_id,
         )
 
 
@@ -59,6 +69,7 @@ class AIToolService:
         courses: CourseService | None = None,
         log_root: Path | None = None,
         activity_log: ActivityLogService | None = None,
+        interactions: InteractionPacer | None = None,
     ) -> None:
         self.ddl = ddl
         self.repository = repository
@@ -69,6 +80,7 @@ class AIToolService:
         self.courses = courses or CourseService(self.user_repository)
         self.log_root = log_root or root / "logs"
         self.activity_log = activity_log
+        self.interactions = interactions or interaction_pacer
 
     def schemas(self) -> list[dict[str, Any]]:
         return [
@@ -211,6 +223,23 @@ class AIToolService:
                 ["hours"],
             ),
             _function(
+                "recent_group_messages",
+                "取得当前群最近消息的消息 ID、发送者 QQ 和 CQ 内容；指代前面消息或批量贴表情时使用",
+                {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+                [],
+            ),
+            _function(
+                "group_member_list",
+                "取得当前群成员的 QQ、群名片/昵称和身份；可筛选群主、管理员或普通成员",
+                {
+                    "role": {
+                        "type": "string",
+                        "enum": ["all", "owner", "admin", "member"],
+                    }
+                },
+                [],
+            ),
+            _function(
                 "wife_show",
                 "查看当前请求者在当前群的今日 wife",
                 {},
@@ -223,15 +252,34 @@ class AIToolService:
                 [],
             ),
             _function(
-                "poke_once",
-                "以受限 AI_MEMBER_DELEGATE 在当前群戳指定群友一次",
-                {"target_user_id": {"type": "string", "pattern": "^[0-9]+$"}},
-                ["target_user_id"],
+                "poke",
+                "以受限 AI_MEMBER_DELEGATE 在当前群串行戳一个或多个指定群友，调用间隔至少 0.3 秒",
+                {
+                    "target_user_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "pattern": "^[0-9]+$"},
+                        "minItems": 1,
+                        "maxItems": MAX_POKES_PER_MINUTE,
+                    },
+                    "count": {"type": "integer", "minimum": 1, "maximum": 5},
+                },
+                ["target_user_ids"],
             ),
             _function(
-                "stick_once",
-                "给当前被回复消息贴一次已知数字 emoji_id",
-                {"emoji_id": {"type": "integer", "minimum": 1}},
+                "stick",
+                (
+                    "串行给一条或多条消息贴表情，调用间隔至少 0.3 秒；"
+                    "message_ids 可指定任意已知消息，省略则使用回复目标或当前消息"
+                ),
+                {
+                    "emoji_id": {"type": "integer", "minimum": 1},
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "pattern": "^-?[0-9]+$"},
+                        "minItems": 1,
+                        "maxItems": 20,
+                    },
+                },
                 ["emoji_id"],
             ),
         ]
@@ -420,6 +468,51 @@ class AIToolService:
                     deterministic=format_deterministic(window, stats),
                     transcript=AnalyticsService.ai_transcript(window),
                 )
+            if name == "recent_group_messages":
+                if not context.group_id:
+                    return _result(False, error="只能读取当前群的最近消息")
+                limit = int(arguments.get("limit") or 20)
+                if not 1 <= limit <= 50:
+                    raise ValueError("limit 必须在 1～50 之间")
+                window = AnalyticsService(self.log_root).load_group(context.group_id, 24)
+                rows = window.records[-limit:]
+                return _result(
+                    True,
+                    messages=[
+                        {
+                            "message_id": str(row.get("message_id") or ""),
+                            "user_id": str(row.get("user_id") or ""),
+                            "plain_text": str(row.get("plain_text") or "")[:500],
+                            "cq_message": cq_message_text(row.get("segments") or [])[:1200],
+                        }
+                        for row in rows
+                    ],
+                )
+            if name == "group_member_list":
+                if not context.group_id or context.bot is None:
+                    return _result(False, error="只能在可访问群成员的群聊中查询")
+                role = str(arguments.get("role") or "all")
+                if role not in {"all", "owner", "admin", "member"}:
+                    raise ValueError("未知群成员身份")
+                rows = await context.bot.get_group_member_list(group_id=int(context.group_id))
+                members = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    member_role = str(row.get("role") or "member")
+                    user_id = str(row.get("user_id") or "")
+                    if not user_id.isdigit() or (role != "all" and member_role != role):
+                        continue
+                    members.append(
+                        {
+                            "user_id": user_id,
+                            "display_name": str(row.get("card") or row.get("nickname") or user_id),
+                            "role": member_role,
+                            "title": str(row.get("title") or ""),
+                            "is_robot": bool(row.get("is_robot")),
+                        }
+                    )
+                return _result(True, role=role, count=len(members), members=members)
             if name == "wife_show":
                 if not context.group_id:
                     return _result(False, error="wife 只能在群聊中使用")
@@ -450,23 +543,83 @@ class AIToolService:
                     datetime.now(ZoneInfo("Asia/Shanghai")).date(),
                 )
                 return _result(True, partner_id=pair.partner_id)
-            if name == "poke_once":
+            if name == "poke":
                 if not context.group_id or context.bot is None:
                     return _result(False, error="只能在群聊中戳人")
-                await context.bot.call_api(
-                    "group_poke", group_id=int(context.group_id), user_id=int(arguments["target_user_id"])
+                if not self._feature_enabled("poke", context):
+                    return _result(False, error="当前群已关闭戳一戳")
+                targets = _numeric_ids(
+                    arguments["target_user_ids"],
+                    field="target_user_ids",
+                    max_items=MAX_POKES_PER_MINUTE,
                 )
-                return _result(True, delegated_capability="AI_MEMBER_DELEGATE")
-            if name == "stick_once":
-                if context.bot is None or not context.replied_message_id:
-                    return _result(False, error="当前消息没有回复目标")
-                await context.bot.call_api(
-                    "set_msg_emoji_like",
-                    message_id=int(context.replied_message_id),
-                    emoji_id=int(arguments["emoji_id"]),
-                    set=True,
+                count = int(arguments.get("count") or 1)
+                if not 1 <= count <= 5:
+                    raise ValueError("count 必须在 1～5 之间")
+                total = len(targets) * count
+                if total > MAX_POKES_PER_MINUTE:
+                    raise ValueError(f"单次最多执行 {MAX_POKES_PER_MINUTE} 次戳一戳")
+                if not poke_rate_limiter.allow(context.requested_by, targets, count):
+                    return _result(False, error="操作过于频繁，请稍后再试")
+                successes = 0
+                failed_targets: list[str] = []
+                for target in targets:
+                    for _repeat in range(count):
+                        try:
+                            async with self.interactions.slot("poke"):
+                                await context.bot.call_api(
+                                    "group_poke", group_id=int(context.group_id), user_id=int(target)
+                                )
+                            successes += 1
+                        except Exception:
+                            failed_targets.append(target)
+                            break
+                return _result(
+                    successes > 0,
+                    target_user_ids=targets,
+                    requested=total,
+                    successes=successes,
+                    failed_target_user_ids=failed_targets,
+                    delegated_capability="AI_MEMBER_DELEGATE",
                 )
-                return _result(True, delegated_capability="AI_MEMBER_DELEGATE")
+            if name == "stick":
+                if context.bot is None:
+                    return _result(False, error="当前没有可用的 QQ 连接")
+                if not self._feature_enabled("stick", context):
+                    return _result(False, error="当前群已关闭贴表情功能")
+                if "message_ids" in arguments:
+                    message_ids = _numeric_ids(
+                        arguments["message_ids"], field="message_ids", max_items=20, positive=False
+                    )
+                else:
+                    default_message_id = context.replied_message_id or context.current_message_id
+                    if not default_message_id:
+                        return _result(False, error="当前消息没有可用的消息 ID")
+                    message_ids = [default_message_id]
+                emoji_id = int(arguments["emoji_id"])
+                if emoji_id <= 0:
+                    raise ValueError("emoji_id 必须是正整数")
+                succeeded: list[str] = []
+                failed: list[str] = []
+                for message_id in message_ids:
+                    try:
+                        async with self.interactions.slot("stick"):
+                            await context.bot.call_api(
+                                "set_msg_emoji_like",
+                                message_id=int(message_id),
+                                emoji_id=emoji_id,
+                                set=True,
+                            )
+                        succeeded.append(message_id)
+                    except Exception:
+                        failed.append(message_id)
+                return _result(
+                    bool(succeeded),
+                    emoji_id=emoji_id,
+                    succeeded_message_ids=succeeded,
+                    failed_message_ids=failed,
+                    delegated_capability="AI_MEMBER_DELEGATE",
+                )
         except (KeyError, TypeError, ValueError) as exc:
             return _result(False, error=str(exc))
         return _result(False, error=f"未知或未授权的 AI 工具：{name}")
@@ -501,6 +654,19 @@ def _pool(value: Any) -> str:
     if pool not in {"activity", "food", "music"}:
         raise ValueError("pool 必须是 activity、food 或 music")
     return pool
+
+
+def _numeric_ids(value: Any, *, field: str, max_items: int, positive: bool = True) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{field} 必须是非空数组")
+    normalized = list(dict.fromkeys(str(item) for item in value))
+    if len(normalized) > max_items:
+        raise ValueError(f"{field} 最多包含 {max_items} 个对象")
+    if any(not item.removeprefix("-").isdigit() or int(item) == 0 for item in normalized):
+        raise ValueError(f"{field} 只能包含非零整数 ID")
+    if positive and any(int(item) < 0 for item in normalized):
+        raise ValueError(f"{field} 只能包含正整数 ID")
+    return normalized
 
 
 def _result(success: bool, **values: Any) -> str:

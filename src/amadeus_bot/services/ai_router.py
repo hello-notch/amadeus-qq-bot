@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import tomllib
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from amadeus_bot.adapters.ai_provider import (
@@ -15,9 +16,15 @@ from amadeus_bot.repositories.core import CoreRepository
 
 
 class AIRouteCatalog:
-    def __init__(self, providers: dict[str, ProviderConfig], routes: dict[AITask, TaskRoute]) -> None:
+    def __init__(
+        self,
+        providers: dict[str, ProviderConfig],
+        routes: dict[AITask, TaskRoute],
+        default_model: ModelTarget,
+    ) -> None:
         self.providers = providers
         self.routes = routes
+        self.default_model = default_model
 
     @classmethod
     def load(cls, path: Path) -> AIRouteCatalog:
@@ -28,6 +35,9 @@ class AIRouteCatalog:
                 name=name,
                 credential_host=str(values["credential_host"]),
                 api_prefix=str(values.get("api_prefix", "")),
+                api_mode=str(values.get("api_mode", "chat_completions")),
+                responses_stream=bool(values.get("responses_stream", False)),
+                models=tuple(str(item) for item in values.get("models", [])),
             )
             for name, values in raw.get("providers", {}).items()
         }
@@ -44,10 +54,53 @@ class AIRouteCatalog:
         if missing:
             names = ", ".join(sorted(item.value for item in missing))
             raise ValueError(f"AI 路由缺少任务：{names}")
-        return cls(providers, routes)
+        runtime = raw.get("runtime", {})
+        default_model = ModelTarget.parse(str(runtime["default_model"]))
+        catalog = cls(providers, routes, default_model)
+        catalog._validate()
+        return catalog
+
+    def model_targets(self) -> tuple[ModelTarget, ...]:
+        return tuple(
+            ModelTarget(provider=provider_name, model=model)
+            for provider_name, provider in self.providers.items()
+            for model in provider.models
+        )
+
+    def resolve_model(self, value: str) -> ModelTarget:
+        normalized = value.strip().casefold()
+        if not normalized:
+            raise ValueError("模型名不能为空")
+        targets = self.model_targets()
+        if "/" in normalized:
+            matches = [target for target in targets if target.qualified_name.casefold() == normalized]
+        else:
+            matches = [target for target in targets if target.model.casefold() == normalized]
+        if not matches:
+            raise ValueError(f"未知模型：{value.strip()}")
+        if len(matches) > 1:
+            choices = "、".join(target.qualified_name for target in matches)
+            raise ValueError(f"模型名不唯一，请使用完整名称：{choices}")
+        return matches[0]
+
+    def _validate(self) -> None:
+        for provider in self.providers.values():
+            if provider.api_mode not in {"chat_completions", "responses"}:
+                raise ValueError(f"未知 AI API 模式：{provider.name}/{provider.api_mode}")
+        configured = set(self.model_targets())
+        if self.default_model not in configured:
+            raise ValueError(f"默认模型未列入 provider 模型清单：{self.default_model.qualified_name}")
+        for task, route in self.routes.items():
+            for target in (route.primary, *route.fallbacks):
+                if target not in configured:
+                    raise ValueError(
+                        f"{task.value} 路由模型未列入 provider 模型清单：{target.qualified_name}"
+                    )
 
 
 class AIService:
+    ACTIVE_MODEL_SETTING = "ai.active_model"
+
     def __init__(
         self,
         catalog: AIRouteCatalog,
@@ -56,20 +109,49 @@ class AIService:
     ) -> None:
         self.catalog = catalog
         self.repository = repository
+        self._model_lock = RLock()
         self.providers: dict[str, OpenAICompatibleProvider] = {}
         for name, provider_config in catalog.providers.items():
             credential = credentials.get(provider_config.credential_host)
             if credential is not None:
                 self.providers[name] = OpenAICompatibleProvider(provider_config, credential)
+        self._active_model = self._load_active_model()
 
     def available(self) -> bool:
         return bool(self.providers)
 
     def route_description(self) -> dict[str, str]:
-        return {
-            task.value: f"{route.primary.provider}/{route.primary.model}"
-            for task, route in self.catalog.routes.items()
-        }
+        current = self.current_model().qualified_name
+        return {task.value: current for task in self.catalog.routes}
+
+    def current_model(self) -> ModelTarget:
+        with self._model_lock:
+            return self._active_model
+
+    def available_models(self) -> tuple[ModelTarget, ...]:
+        return tuple(target for target in self.catalog.model_targets() if target.provider in self.providers)
+
+    def switch_model(self, model_name: str, actor: str) -> ModelTarget:
+        target = self.catalog.resolve_model(model_name)
+        if target.provider not in self.providers:
+            raise ValueError(f"模型供应商未配置凭据：{target.provider}")
+        self.repository.set_runtime_setting(
+            self.ACTIVE_MODEL_SETTING,
+            target.qualified_name,
+            actor,
+        )
+        with self._model_lock:
+            self._active_model = target
+        return target
+
+    def _load_active_model(self) -> ModelTarget:
+        stored = self.repository.get_runtime_setting(self.ACTIVE_MODEL_SETTING)
+        if stored:
+            try:
+                return self.catalog.resolve_model(stored)
+            except ValueError:
+                pass
+        return self.catalog.default_model
 
     async def complete(
         self,
@@ -85,7 +167,12 @@ class AIService:
             raise AIQuotaExceeded(f"AI 任务 {task.value} 已达到当日调用上限 {quota[0]}")
         route = self.catalog.routes[task]
         errors: list[str] = []
-        for target in (route.primary, *route.fallbacks):
+        targets = dict.fromkeys(
+            (route.primary, *route.fallbacks)
+            if task == AITask.VISION
+            else (self.current_model(), route.primary, *route.fallbacks)
+        )
+        for target in targets:
             provider = self.providers.get(target.provider)
             if provider is None:
                 errors.append(f"{target.provider}:credential-unavailable")

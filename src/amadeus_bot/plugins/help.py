@@ -17,7 +17,7 @@ command_registry.register(
     CommandSpec(
         name="help",
         description="查看按权限和群开关过滤后的帮助",
-        usage="help | /help [command] | 帮助",
+        usage="help：查看普通命令；help superuser：管理员查看所有命令；help <command>：查看命令详情",
         aliases=("帮助",),
         permission=PermissionLevel.EVERYONE,
         ai_callable=True,
@@ -40,7 +40,7 @@ HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("互动", ("stick", "poke")),
     (
         "开发者管理",
-        ("member", "feature", "broadcast", "data", "log", "ai-cost", "ai-quota", "say"),
+        ("member", "feature", "broadcast", "data", "log", "model", "ai-cost", "ai-quota", "say"),
     ),
 )
 
@@ -51,9 +51,23 @@ async def handle_help(matcher: Matcher, event, arguments: Message = CommandArg()
     container = get_container()
     role = container.permissions.role_for(event.get_user_id())
     group_id = event_group_id(event)
+    if target.lower() == "superuser":
+        if role != PermissionLevel.SUPERUSER:
+            await matcher.finish("该帮助仅 SUPERUSER 可查看。")
+        await _finish_help_image(
+            matcher,
+            _format_overview(role, None, include_superuser=True),
+            title="Amadeus Bot 管理员帮助",
+            variant="overview:superuser:all",
+        )
+        return
     if target:
         spec = command_registry.get(target)
-        if spec is None or not _visible(spec, role, group_id):
+        if (
+            spec is None
+            or not _visible(spec, role, group_id)
+            or (spec.permission == PermissionLevel.SUPERUSER and role != PermissionLevel.SUPERUSER)
+        ):
             await matcher.finish(f"没有找到你当前可用的命令：{target}")
         await _finish_help_image(
             matcher,
@@ -83,27 +97,45 @@ async def prewarm_help_images() -> None:
     # The sentinel represents a group with no per-group overrides. Because the
     # renderer key includes content, ordinary groups reuse this exact image.
     scopes: tuple[str | None, ...] = (None, "__default__", *sorted(group_ids))
-    jobs = []
+    requests: list[tuple[str, str, str]] = []
     for role in (PermissionLevel.EVERYONE, PermissionLevel.MEMBER, PermissionLevel.SUPERUSER):
         for group_id in scopes:
-            jobs.append(
-                container.renderer.render_text(
-                    _format_overview(role, group_id),
-                    title="Amadeus Bot 帮助",
-                    variant=f"overview:{role.value}",
-                )
-            )
+            requests.append((_format_overview(role, group_id), "Amadeus Bot 帮助", f"overview:{role.value}"))
+            if role == PermissionLevel.SUPERUSER:
+                if group_id is None:
+                    requests.append(
+                        (
+                            _format_overview(role, None, include_superuser=True),
+                            "Amadeus Bot 管理员帮助",
+                            "overview:superuser:all",
+                        )
+                    )
     for spec in command_registry.all():
-        jobs.append(
-            container.renderer.render_text(
-                _format_detail(spec),
-                title=f"帮助 · /{spec.name}",
-                variant=f"detail:{spec.name}",
-            )
-        )
-    results = await asyncio.gather(*jobs, return_exceptions=True)
+        requests.append((_format_detail(spec), f"帮助 · /{spec.name}", f"detail:{spec.name}"))
+    results = await asyncio.gather(
+        *(
+            container.renderer.render_text(text, title=title, variant=variant)
+            for text, title, variant in requests
+        ),
+        return_exceptions=True,
+    )
+    for index, result in enumerate(results):
+        if isinstance(result, Exception):
+            text, title, variant = requests[index]
+            try:
+                results[index] = await container.renderer.render_text(text, title=title, variant=variant)
+            except Exception as exc:
+                results[index] = exc
     failures = sum(isinstance(result, Exception) for result in results)
     if failures:
+        for index, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "帮助预渲染失败 index={} type={} reason={}",
+                    index,
+                    type(result).__name__,
+                    str(result).splitlines()[0][:160],
+                )
         logger.warning("帮助图片预渲染有 {} 项失败；/help 不会降级发送整页文字", failures)
     else:
         logger.info("帮助图片预渲染完成：{} 个缓存项", len(results))
@@ -118,8 +150,13 @@ async def _finish_help_image(matcher: Matcher, text: str, *, title: str, variant
     await matcher.finish(MessageSegment.image(path.resolve().as_uri()))
 
 
-def _format_overview(role: PermissionLevel, group_id: str | None) -> str:
-    visible = [spec for spec in command_registry.all() if _visible(spec, role, group_id)]
+def _format_overview(role: PermissionLevel, group_id: str | None, *, include_superuser: bool = False) -> str:
+    visible = [
+        spec
+        for spec in command_registry.all()
+        if _visible(spec, role, group_id)
+        and (include_superuser or spec.permission != PermissionLevel.SUPERUSER)
+    ]
     by_name = {spec.name: spec for spec in visible}
     lines = ["Amadeus Bot · 可用命令", ""]
     included: set[str] = set()
@@ -138,14 +175,21 @@ def _format_overview(role: PermissionLevel, group_id: str | None) -> str:
         for spec in remaining:
             lines.extend(_overview_lines(spec))
         lines.append("")
-    lines.extend(("使用 /help <command> 查看参数、示例、权限和规则。", "命令前的 / 可省略。"))
+    lines.extend(
+        (
+            "🔧 表示该命令的部分能力可由 AI 工具调用。",
+            "使用 /help <command> 查看参数、示例、权限和规则。",
+            "SUPERUSER 可用 help superuser 查看全部命令。",
+            "命令前的 / 可省略。",
+        )
+    )
     return "\n".join(lines)
 
 
 def _overview_lines(spec: CommandSpec) -> list[str]:
     aliases = f"（别名：{'、'.join('/' + item for item in spec.aliases)}）" if spec.aliases else ""
-    ai = "可由 AI 调用" if spec.ai_callable else "仅手动命令"
-    return [f"/{spec.name} {aliases}", f"  {spec.description}｜{spec.permission.value}｜{ai}"]
+    ai = "  🔧" if spec.ai_callable else ""
+    return [f"/{spec.name}{ai} {aliases}", f"  {spec.description}｜{spec.permission.value}"]
 
 
 def _visible(spec: CommandSpec, role: PermissionLevel, group_id: str | None) -> bool:
@@ -161,7 +205,9 @@ def _format_detail(spec: CommandSpec) -> str:
     lines = [
         f"命令：/{spec.name}",
         f"说明：{spec.description}",
-        f"用法：{spec.usage}",
+        "用法：",
+        *("  " + item.strip() for item in spec.usage.replace("；", "\n").splitlines() if item.strip()),
+        "",
         f"权限：{spec.permission.value}",
         f"AI 调用：{'是' if spec.ai_callable else '否'}",
     ]

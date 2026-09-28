@@ -23,7 +23,11 @@ command_registry.register(
     CommandSpec(
         name="data",
         description="创建数据备份并管理数据保留策略",
-        usage="/data backup | backups | restore <archive> [token] | migrate | retention [days]",
+        usage=(
+            "/data backup：创建备份；/data backups：列出备份；"
+            "/data restore <archive> [token]：预检并确认恢复；"
+            "/data migrate：运行迁移；/data retention [days]：查看或设置保留期"
+        ),
         permission=PermissionLevel.SUPERUSER,
         ai_callable=False,
     )

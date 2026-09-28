@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Amadeus 模拟会话</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="mark">A</span><div><strong>Amadeus</strong><small>本地测试会话</small></div></div>
+      <div class="side-label">会话</div>
+      <button class="room active" data-scope="group"><span class="room-icon">#</span><span>模拟群聊<small>所有模拟用户</small></span></button>
+      <button class="room" data-scope="private"><span class="room-icon">◉</span><span>模拟私聊<small>当前所选用户</small></span></button>
+      <div class="side-label people-label">模拟用户</div>
+      <div id="users" class="users"></div>
+      <div class="side-foot"><span id="signal" class="signal"></span><span id="connection">连接中</span></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><h1 id="room-title">模拟群聊</h1><p id="room-subtitle">OneBot V11 · 本地</p></div>
+        <span class="tag" id="actor-label">测试管理员</span>
+      </header>
+      <section id="timeline" class="timeline" aria-live="polite"></section>
+      <section class="composer">
+        <div id="reply" class="reply hidden"><span id="reply-label"></span><button id="clear-reply" title="取消回复" aria-label="取消回复">×</button></div>
+        <div id="attachments" class="attachments"></div>
+        <textarea id="text" rows="2" placeholder="输入消息或命令，例如 /calc 1+2" aria-label="消息"></textarea>
+        <div class="tools">
+          <div class="tool-group">
+            <button id="at" title="添加 @ 用户" aria-label="添加 @ 用户">@</button>
+            <button id="face" title="添加 QQ 表情 ID" aria-label="添加 QQ 表情">☺</button>
+            <button id="image" title="添加本地图片" aria-label="添加图片">▧</button>
+            <button id="poke" title="向机器人发送戳一戳事件" aria-label="戳一戳">☞</button>
+            <input type="file" id="image-file" accept="image/*" hidden>
+          </div>
+          <div class="send-group"><span id="hint">Ctrl+Enter 发送</span><button id="send" class="send">发送 <span>↗</span></button></div>
+        </div>
+        <div id="error" class="error" role="alert"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -11,14 +11,23 @@ from amadeus_bot.domain.ai import AITask
 from amadeus_bot.domain.commands import CommandSpec, command_registry
 from amadeus_bot.domain.permissions import PermissionLevel
 from amadeus_bot.plugins.common import finish_text_or_image
+from amadeus_bot.services.ai_pricing import (
+    estimate_usage_cost_usd,
+    format_usd,
+    provider_display_name,
+)
+from amadeus_bot.services.campus import format_source_timestamp
 
 for spec in (
     CommandSpec(
         name="health",
         description="查看机器人和依赖服务状态",
-        usage="/health [detail | source <portal/activity/jwgl>]",
+        usage=(
+            "/health：查看状态；/health detail：查看详细状态；"
+            "/health source <portal/activity/jwgl>：查看数据源状态"
+        ),
         permission=PermissionLevel.EVERYONE,
-        ai_callable=True,
+        ai_callable=False,
     ),
     CommandSpec(
         name="ai-cost",
@@ -30,7 +39,7 @@ for spec in (
     CommandSpec(
         name="ai-quota",
         description="查看或设置 AI 任务日调用配额",
-        usage="/ai-quota status | set <purpose> <daily_limit>",
+        usage=("/ai-quota status：查看配额；/ai-quota set <purpose> <daily_limit>：设置每日限额"),
         permission=PermissionLevel.SUPERUSER,
         ai_callable=False,
     ),
@@ -57,9 +66,22 @@ async def handle_health(bot: Bot, event, arguments: Message = CommandArg()) -> N
     except Exception:
         protocol_ok = False
     if not argument:
+        sources = []
+        for source, label in (("portal", "信息门户"), ("activity", "第二课堂")):
+            row = container.repository.get_source_health(source)
+            if row is None or not row.get("last_success_at"):
+                status = "尚未成功抓取"
+            elif row.get("consecutive_failures"):
+                status = "最近抓取失败（显示上次有效缓存）"
+            else:
+                status = "最近抓取成功"
+            sources.append(
+                f"{label}：{status}\n  最新信息更新时间："
+                f"{format_source_timestamp(row['last_success_at'] if row else None)}"
+            )
         await health_command.finish(
             f"机器人：{'正常' if protocol_ok else '异常'}\n数据库：{'正常' if database_ok else '异常'}\n"
-            f"AI：{'已配置' if container.ai.available() else '未配置'}"
+            f"AI：{'已配置' if container.ai.available() else '未配置'}\n" + "\n".join(sources)
         )
     if argument.startswith("source"):
         source = argument.removeprefix("source").strip()
@@ -69,8 +91,8 @@ async def handle_health(bot: Bot, event, arguments: Message = CommandArg()) -> N
         if row is None:
             await health_command.finish(f"{source}：尚无抓取记录。")
         await health_command.finish(
-            f"{source}\n最后成功：{row['last_success_at'] or '-'}\n"
-            f"最后失败：{row['last_failure_at'] or '-'}\n"
+            f"{source}\n最后成功：{format_source_timestamp(row['last_success_at'])}\n"
+            f"最后失败：{format_source_timestamp(row['last_failure_at'])}\n"
             f"连续失败：{row['consecutive_failures']}\n缓存条目：{row['item_count']}\n"
             f"错误摘要：{row['error_summary'] or '-'}\ntrace：{row['trace_id'] or '-'}"
         )
@@ -97,12 +119,22 @@ async def handle_cost(event, arguments: Message = CommandArg()) -> None:
     rows = get_container().repository.ai_usage_summary(days)
     if not rows:
         await cost_command.finish("指定时间内没有 AI 调用记录。")
-    lines = [f"AI 使用量 · {period}", "价格未配置，因此暂不显示不可靠的费用估算。", ""]
-    for row in rows:
+    priced_rows = [(row, estimate_usage_cost_usd(row)) for row in rows]
+    known_costs = [cost for _, cost in priced_rows if cost is not None]
+    lines = [
+        f"AI 成本与用量 · {period}",
+        f"已配置费用合计：{format_usd(sum(known_costs))}",
+        "计价：USD/百万 token；DeepSeek 按调用时的 UTC 峰/谷价及缓存价计算。",
+        "桓衍使用站内标准价 × 0.1 的打折后价格；gpt_gateway 是桓衍 provider 的旧名。",
+        "",
+    ]
+    for row, cost in priced_rows:
+        cost_text = format_usd(cost) if cost is not None else "未配置"
         lines.append(
-            f"{row['provider']}/{row['model']} · {row['task']}\n"
+            f"{provider_display_name(row['provider'])}/{row['model']} · {row['task']}\n"
             f"  calls={row['calls']} in={row['input_tokens']} out={row['output_tokens']} "
-            f"avg={row['avg_latency_ms']}ms failures={row['failures']}"
+            f"cached={row['cached_tokens']} cost={cost_text}\n"
+            f"  avg={row['avg_latency_ms']}ms failures={row['failures']}"
         )
     await finish_text_or_image(cost_command, "\n".join(lines), title="AI 成本与用量", force_image=True)
 

@@ -193,12 +193,28 @@ class CoreRepository:
     def ai_usage_summary(self, days: int) -> list[dict[str, Any]]:
         rows = self.database.fetch_all(
             """
+            WITH usage_with_period AS (
+                SELECT *,
+                       CASE
+                           WHEN CAST(strftime('%w', created_at) AS INTEGER) BETWEEN 1 AND 5
+                                AND (
+                                    CAST(strftime('%H', created_at) AS INTEGER) BETWEEN 1 AND 3
+                                    OR CAST(strftime('%H', created_at) AS INTEGER) BETWEEN 6 AND 9
+                                )
+                           THEN 1 ELSE 0
+                       END AS is_deepseek_peak
+                FROM ai_usage
+                WHERE created_at >= datetime('now', ?)
+            )
             SELECT provider, model, task, COUNT(*) AS calls,
                    SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                   SUM(cached_tokens) AS cached_tokens,
+                   SUM(CASE WHEN is_deepseek_peak=1 THEN input_tokens ELSE 0 END) AS peak_input_tokens,
+                   SUM(CASE WHEN is_deepseek_peak=1 THEN output_tokens ELSE 0 END) AS peak_output_tokens,
+                   SUM(CASE WHEN is_deepseek_peak=1 THEN cached_tokens ELSE 0 END) AS peak_cached_tokens,
                    CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
                    SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures
-            FROM ai_usage
-            WHERE created_at >= datetime('now', ?)
+            FROM usage_with_period
             GROUP BY provider, model, task
             ORDER BY calls DESC
             """,
@@ -246,6 +262,23 @@ class CoreRepository:
         if row is None:
             return None
         return int(row["daily_limit"]), int(row["used_today"])
+
+    def get_runtime_setting(self, key: str) -> str | None:
+        row = self.database.fetch_one("SELECT value FROM runtime_settings WHERE key=?", (key,))
+        return str(row["value"]) if row is not None else None
+
+    def set_runtime_setting(self, key: str, value: str, actor: str) -> None:
+        self.database.execute(
+            """
+            INSERT INTO runtime_settings(key, value, updated_by, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                updated_by=excluded.updated_by,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (key, value, str(actor)),
+        )
 
     def append_conversation(self, scope_key: str, role: str, content: str, user_id: str | None) -> None:
         self.database.execute(
@@ -361,26 +394,34 @@ class CoreRepository:
         )
         return not existed
 
-    def query_source_items(self, source: str, query: str = "", limit: int = 10) -> list[dict[str, Any]]:
+    def query_source_items(
+        self, source: str, query: str = "", limit: int = 10, offset: int = 0
+    ) -> list[dict[str, Any]]:
         if query:
             pattern = f"%{query}%"
             rows = self.database.fetch_all(
                 """
                 SELECT * FROM source_items WHERE source=? AND
                 (title LIKE ? OR summary LIKE ? OR department LIKE ?)
-                ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT ?
+                ORDER BY COALESCE(published_at, first_seen_at) DESC, item_id DESC LIMIT ? OFFSET ?
                 """,
-                (source, pattern, pattern, pattern, int(limit)),
+                (source, pattern, pattern, pattern, int(limit), int(offset)),
             )
         else:
             rows = self.database.fetch_all(
                 """
                 SELECT * FROM source_items WHERE source=?
-                ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT ?
+                ORDER BY COALESCE(published_at, first_seen_at) DESC, item_id DESC LIMIT ? OFFSET ?
                 """,
-                (source, int(limit)),
+                (source, int(limit), int(offset)),
             )
         return [dict(row) for row in rows]
+
+    def get_source_item(self, source: str, item_id: str) -> dict[str, Any] | None:
+        row = self.database.fetch_one(
+            "SELECT * FROM source_items WHERE source=? AND item_id=?", (source, item_id)
+        )
+        return dict(row) if row else None
 
     def set_source_health(
         self,

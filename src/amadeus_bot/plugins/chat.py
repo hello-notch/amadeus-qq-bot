@@ -8,7 +8,9 @@ import time
 import uuid
 from collections import defaultdict, deque
 from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx
 from nonebot import on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, Message
 from nonebot.params import CommandArg
@@ -19,6 +21,8 @@ from amadeus_bot.domain.ai import AITask
 from amadeus_bot.domain.commands import CommandSpec, command_registry
 from amadeus_bot.domain.permissions import PermissionLevel
 from amadeus_bot.plugins.common import event_group_id, finish_text_or_image, reply_message_id
+from amadeus_bot.services.analytics import AnalyticsService
+from amadeus_bot.services.event_utils import ai_event_text, onebot_message
 from amadeus_bot.services.tools import ToolExecutionContext
 
 command_registry.register(
@@ -55,9 +59,9 @@ _last_seen: dict[str, float] = {}
 @chat_command.handle()
 async def handle_chat(bot: Bot, event, arguments: Message = CommandArg()) -> None:
     text = arguments.extract_plain_text().strip()
-    if not text:
+    if not text and not any(item.type in {"image", "file"} for item in event.get_message()):
         await chat_command.finish("用法：/chat <message>")
-    await _respond(chat_command, bot, event, text)
+    await _respond(chat_command, bot, event, text or "请看看这份附件。")
 
 
 @history_command.handle()
@@ -99,9 +103,11 @@ async def handle_history(event, arguments: Message = CommandArg()) -> None:
 @mention_matcher.handle()
 async def handle_mention(bot: Bot, event) -> None:
     text = event.get_plaintext().strip()
-    if not text or text.startswith("/"):
+    if (
+        not text and not any(item.type in {"image", "file"} for item in event.get_message())
+    ) or text.startswith("/"):
         return
-    await _respond(mention_matcher, bot, event, text)
+    await _respond(mention_matcher, bot, event, text or "请看看这份附件。")
 
 
 @proactive_matcher.handle()
@@ -135,7 +141,8 @@ async def handle_proactive(bot: Bot, event) -> None:
                         "role": "user",
                         "content": (
                             "判断 Amadeus 是否应主动接话。只回复 JSON："
-                            '{"respond":true/false,"confidence":0-1,"reason":"..."}。消息：' + text
+                            '{"respond":true/false,"confidence":0-1,"reason":"..."}。消息：'
+                            + ai_event_text(event, text)
                         ),
                     }
                 ],
@@ -170,7 +177,8 @@ async def _respond(matcher, bot: Bot, event, text: str) -> None:
     )
     scope_key = f"group:{group_id}" if group_id else f"private:{user_id}"
     enriched = await _enrich_input(container, bot, event, text, group_id, user_id)
-    stored_content = f"[{user_id}]: {enriched}" if group_id else enriched
+    message_id = str(getattr(event, "message_id", "") or "未知")
+    stored_content = f"[消息 #{message_id}][发送者 QQ {user_id}]: {enriched}"
     container.repository.append_conversation(scope_key, "user", stored_content, user_id)
     messages = [{"role": "system", "content": _load_persona()}]
     messages.extend(container.repository.recent_conversation(scope_key, limit=14))
@@ -182,7 +190,7 @@ async def _respond(matcher, bot: Bot, event, text: str) -> None:
             user_id=user_id,
             tools=container.ai_tools.schemas(),
         )
-        response = await _resolve_tool_calls(
+        response, silent_after_stick = await _resolve_tool_calls(
             container,
             response,
             messages,
@@ -190,9 +198,15 @@ async def _respond(matcher, bot: Bot, event, text: str) -> None:
             group_id=group_id,
             bot=bot,
             replied_message_id=reply_message_id(event),
+            current_message_id=str(getattr(event, "message_id", "") or "") or None,
         )
     except Exception:
         await matcher.finish("Amadeus 暂时无法连接到 AI 服务，请稍后再试。")
+    if silent_after_stick:
+        container.repository.append_conversation(
+            scope_key, "assistant", "[已通过工具完成贴表情，按规则保持静默]", None
+        )
+        return
     reply = response.content.strip()
     if not reply:
         await matcher.finish("AI 返回了空内容，请稍后重试。")
@@ -222,13 +236,19 @@ async def _resolve_tool_calls(
     group_id: str | None,
     bot: Bot,
     replied_message_id: str | None,
+    current_message_id: str | None,
 ):
     context = ToolExecutionContext.for_requester(
-        user_id, group_id, bot=bot, replied_message_id=replied_message_id
+        user_id,
+        group_id,
+        bot=bot,
+        replied_message_id=replied_message_id,
+        current_message_id=current_message_id,
     )
+    silent_after_stick = False
     for _ in range(2):
         if not response.tool_calls:
-            return response
+            return response, silent_after_stick
         assistant_tool_calls = []
         for call in response.tool_calls[:3]:
             assistant_tool_calls.append(
@@ -241,15 +261,21 @@ async def _resolve_tool_calls(
                     },
                 }
             )
-        messages.append(
-            {
-                "role": "assistant",
-                "content": response.content or None,
-                "tool_calls": assistant_tool_calls,
-            }
-        )
+        assistant_message = {
+            "role": "assistant",
+            "content": response.content or None,
+            "tool_calls": assistant_tool_calls,
+        }
+        if response.output_items:
+            assistant_message["_responses_output"] = list(response.output_items)
+        messages.append(assistant_message)
         for call in response.tool_calls[:3]:
             result = await container.ai_tools.execute(call.name, call.arguments, context)
+            if call.name == "stick":
+                try:
+                    silent_after_stick = silent_after_stick or bool(json.loads(result).get("success"))
+                except json.JSONDecodeError:
+                    pass
             messages.append(
                 {
                     "role": "tool",
@@ -276,7 +302,7 @@ async def _resolve_tool_calls(
         )
     if response.tool_calls:
         raise RuntimeError("AI 工具调用轮数超过限制")
-    return response
+    return response, silent_after_stick
 
 
 def _load_persona() -> str:
@@ -291,7 +317,38 @@ def _load_persona() -> str:
 
 async def _enrich_input(container, bot: Bot, event, text: str, group_id: str | None, user_id: str) -> str:
     additions: list[str] = []
-    for segment in event.get_message():
+    message = event.get_message()
+    reply_id = reply_message_id(event)
+    if reply_id:
+        try:
+            detail = await bot.get_msg(message_id=int(reply_id))
+            message = message + onebot_message(detail.get("message"))
+        except Exception:
+            additions.append("被回复消息无法读取。")
+    elif not any(item.type in {"image", "file"} for item in message) and group_id:
+        # A short follow-up such as "笑点解析" commonly refers to the sender's last image.
+        try:
+            rows = AnalyticsService(container.paths.logs).load_group(group_id, 1).records
+            previous = next(
+                (
+                    row
+                    for row in reversed(rows)
+                    if str(row.get("message_id")) != str(getattr(event, "message_id", ""))
+                ),
+                None,
+            )
+            if previous and (
+                str(previous.get("user_id")) != user_id
+                or abs(int(getattr(event, "time", 0)) - int(previous.get("timestamp", 0))) > 120
+            ):
+                previous = None
+            if previous and previous.get("segments"):
+                prior = onebot_message(previous["segments"])
+                if any(item.type in {"image", "file"} for item in prior):
+                    message = message + prior
+        except (AttributeError, TypeError, ValueError):
+            pass
+    for segment in message:
         if segment.type == "image" and segment.data.get("url"):
             url = str(segment.data["url"])
             digest = hashlib.sha256(url.encode()).hexdigest()
@@ -320,6 +377,32 @@ async def _enrich_input(container, bot: Bot, event, text: str, group_id: str | N
                 except Exception:
                     description = "[图片，视觉服务暂不可用]"
             additions.append("图片描述：" + description)
+        elif segment.type == "file":
+            filename = str(segment.data.get("name") or segment.data.get("file") or "未命名文件")
+            url = str(segment.data.get("url") or "")
+            suffix = Path(filename).suffix.lower()
+            if suffix not in {".txt", ".md", ".csv", ".json", ".ics"}:
+                additions.append(f"文件：{filename}（暂不支持读取此格式的正文）")
+            elif (
+                not url
+                or urlparse(url).scheme != "https"
+                or not (urlparse(url).hostname or "").endswith(".qq.com")
+            ):
+                additions.append(f"文件：{filename}（没有可用的安全下载链接）")
+            else:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+                        async with client.stream("GET", url) as response:
+                            response.raise_for_status()
+                            data = bytearray()
+                            async for chunk in response.aiter_bytes():
+                                data.extend(chunk)
+                                if len(data) > 256 * 1024:
+                                    raise ValueError("文件过大")
+                    content = bytes(data).decode("utf-8-sig")
+                    additions.append(f"文件 {filename} 的正文（最多 6000 字）：\n{content[:6000]}")
+                except (httpx.HTTPError, UnicodeError, ValueError):
+                    additions.append(f"文件：{filename}（读取失败或不支持编码）")
         elif segment.type == "record":
             try:
                 result = await bot.call_api("fetch_ptt_text", file=segment.data.get("file"))
@@ -330,7 +413,8 @@ async def _enrich_input(container, bot: Bot, event, text: str, group_id: str | N
     urls = re.findall(r"https?://\S+", text)
     if urls:
         additions.append("消息包含链接（未自动访问）：" + " ".join(urls[:3]))
-    return text + (("\n" + "\n".join(additions)) if additions else "")
+    base = ai_event_text(event, text)
+    return base + (("\n" + "\n".join(additions)) if additions else "")
 
 
 def _proactive_score(text: str, group_id: str, now: float) -> int:

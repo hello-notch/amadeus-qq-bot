@@ -18,6 +18,9 @@ if not exist "%NAPCAT_DIR%\launcher-user.bat" (
     exit /b 1
 )
 
-start "NapCat" /d "%NAPCAT_DIR%" cmd /k call launcher-user.bat "%QQ_UIN%"
-timeout /t 1 /nobreak >nul
-start "Amadeus NoneBot" /d "%PROJECT_ROOT%" cmd /k uv run amadeus-bot
+if not exist "%PROJECT_ROOT%run-windows-hidden.vbs" (
+    echo [ERROR] Tray launcher was not found in "%PROJECT_ROOT%".
+    exit /b 1
+)
+
+wscript.exe "%PROJECT_ROOT%run-windows-hidden.vbs"

@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS ai_quotas (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS conversation_messages (
     conversation_id INTEGER PRIMARY KEY AUTOINCREMENT,
     scope_key TEXT NOT NULL,

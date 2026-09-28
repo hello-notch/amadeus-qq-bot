@@ -19,12 +19,13 @@ command_registry.register(
         name="ddl",
         description="管理自己的 DDL；SUPERUSER 可用 --user 指定数据主体",
         usage=(
-            "/ddl add <时间> <内容> [--remind <at/提前量/off>]；"
-            "/ddl list [todo/done/all]；/ddl show/done/del <id>；"
-            "/ddl edit <id> [--time <时间>] [--content <内容>]；"
-            "/ddl remind <id> <at/提前量/off>"
+            "/ddl add <时间> <内容> [--remind <at/提前量/off>]：添加待办；"
+            "/ddl list [todo/done/all]：列出待办；"
+            "/ddl show <id>：查看详情；/ddl done <id>：标记完成；/ddl del <id>：删除待办；"
+            "/ddl edit <id> [--time <时间>] [--content <内容>]：修改待办；"
+            "/ddl remind <id> <at/提前量/off>：调整提醒"
         ),
-        permission=PermissionLevel.SELF_OR_SUPERUSER,
+        permission=PermissionLevel.EVERYONE,
         feature="ddl",
         ai_callable=True,
         examples=(

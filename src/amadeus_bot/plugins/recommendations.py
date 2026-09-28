@@ -50,7 +50,11 @@ for spec in (
     CommandSpec(
         name="recommend",
         description="查看或维护独立推荐池",
-        usage="/recommend list <pool> [path] | add <pool> <path> <content> | del <id>",
+        usage=(
+            "/recommend list <pool> [path]：查看推荐池；"
+            "/recommend add <pool> <path> <content>：添加推荐；"
+            "/recommend del <id>：删除推荐"
+        ),
         permission=PermissionLevel.EVERYONE,
         feature="recommendation",
         ai_callable=True,

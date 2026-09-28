@@ -22,6 +22,7 @@ from amadeus_bot.services.campus import (
     load_cookie_header_file,
     parse_portal_list,
 )
+from amadeus_bot.settings import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 SECRETS = ROOT / "secrets"
@@ -85,12 +86,18 @@ async def probe_jwgl() -> dict:
 
 
 async def probe_activity() -> dict:
-    token = (SECRETS / "activity-token.txt").read_text(encoding="utf-8").strip()
-    url = "https://dekt.bupt.edu.cn/api/v1/participation/admin/act"
+    token_path = SECRETS / "activity-token.txt"
+    if not token_path.is_file():
+        return {"configured": False, "status": "token_missing"}
+    token = token_path.read_text(encoding="utf-8").strip()
+    url = "https://dekt.bupt.edu.cn/api/v1/activity"
     params = {
-        "act_state": 0,
-        "page": 1,
-        "page_size": 50,
+        "college_id": "0",
+        "grade": "0",
+        "class_id": "0",
+        "role_id": "0",
+        "page": "1",
+        "page_size": "50",
     }
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(
@@ -109,31 +116,34 @@ async def probe_activity() -> dict:
         data = payload.get("data") if isinstance(payload, dict) else payload
         result["items"] = len(data) if isinstance(data, list) else None
     elif response.status_code >= 400:
-        result["error_preview"] = response.text[:300]
+        result["error_kind"] = "authentication" if response.status_code in {401, 403} else "http"
     return result
 
 
 async def probe_service_layer() -> dict:
     os.environ["AMADEUS_PORTAL_COOKIE_FILE"] = str(SECRETS / "portal-cookie.txt")
     os.environ["AMADEUS_ACTIVITY_TOKEN_FILE"] = str(SECRETS / "activity-token.txt")
-    os.environ["AMADEUS_ACTIVITY_LIST_ENDPOINT"] = "/api/v1/participation/admin/act"
+    os.environ["AMADEUS_ACTIVITY_LIST_ENDPOINT"] = "/api/v1/activity"
     with tempfile.TemporaryDirectory(prefix="amadeus-campus-probe-") as directory:
         database = CoreDatabase(Path(directory) / "core.sqlite3")
         database.initialize()
         repository = CoreRepository(database)
         portal_result = await PortalSource(repository).refresh()
-        activity_result = await ActivitySource(repository).refresh()
-        return {
+        result = {
             "portal_refresh": portal_result,
             "portal_health": repository.get_source_health("portal"),
-            "activity_refresh": activity_result,
-            "activity_health": repository.get_source_health("activity"),
         }
+        try:
+            result["activity_refresh"] = await ActivitySource(repository).refresh()
+            result["activity_health"] = repository.get_source_health("activity")
+        except Exception as exc:
+            result["activity_error"] = type(exc).__name__
+        return result
 
 
 async def probe_activity_service() -> dict:
     os.environ["AMADEUS_ACTIVITY_TOKEN_FILE"] = str(SECRETS / "activity-token.txt")
-    os.environ["AMADEUS_ACTIVITY_LIST_ENDPOINT"] = "/api/v1/participation/admin/act"
+    os.environ["AMADEUS_ACTIVITY_LIST_ENDPOINT"] = "/api/v1/activity"
     with tempfile.TemporaryDirectory(prefix="amadeus-activity-probe-") as directory:
         database = CoreDatabase(Path(directory) / "core.sqlite3")
         database.initialize()
@@ -146,6 +156,7 @@ async def probe_activity_service() -> dict:
 
 
 async def main() -> None:
+    load_project_env()
     parser = argparse.ArgumentParser()
     parser.add_argument("--activity-only", action="store_true")
     options = parser.parse_args()

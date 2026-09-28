@@ -26,6 +26,7 @@ def test_single_segment_get_msg_payload_is_accepted() -> None:
 
 def test_activity_feature_is_enabled_by_default() -> None:
     assert DEFAULT_FEATURES["activity"] is True
+    assert DEFAULT_FEATURES["proactive_chat"] is True
 
 
 def test_bupt_timetable_matrix_parser_and_preview(tmp_path: Path) -> None:

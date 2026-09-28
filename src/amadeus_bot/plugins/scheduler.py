@@ -22,6 +22,8 @@ _last_retention_cleanup = 0.0
 @get_driver().on_startup
 async def start_scheduler() -> None:
     global _task
+    if os.getenv("AMADEUS_SIMULATOR_ROOT"):
+        return
     if _task is None or _task.done():
         _task = asyncio.create_task(_scheduler_loop(), name="amadeus-scheduler")
 

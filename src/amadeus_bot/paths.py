@@ -37,6 +37,8 @@ class AppPaths:
 
     @property
     def backups(self) -> Path:
+        if root := os.getenv("AMADEUS_SIMULATOR_ROOT"):
+            return Path(root).resolve() / "backups"
         return self.project_root / "backups"
 
     def ensure_runtime_directories(self) -> None:

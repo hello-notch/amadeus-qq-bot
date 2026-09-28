@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from nonebot import on_command
@@ -52,7 +54,9 @@ async def handle_issue(bot: Bot, event, arguments: Message = CommandArg()) -> No
         replied_message = _api_message_payload(detail)
         anchor_time = int(detail.get("time") or current_time)
         anchor_id = str(detail.get("message_id") or target_id)
-    service = IssueReportService(container.paths.project_root, container.paths.logs)
+    simulation_root = os.getenv("AMADEUS_SIMULATOR_ROOT")
+    root = Path(simulation_root) if simulation_root else container.paths.project_root
+    service = IssueReportService(root, container.paths.logs)
     directory = await service.capture(
         anchor_timestamp=anchor_time,
         anchor_message_id=anchor_id,

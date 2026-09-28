@@ -18,10 +18,14 @@ command_registry.register(
         name="feature",
         description="管理全局/群功能开关和忽略用户规则",
         usage=(
-            "/feature list [group_id]；/feature status <feature> [group_id]；"
-            "/feature enable|disable <feature> <group_id/global>；"
-            "/feature reset <feature> <group_id>；"
-            "/feature ignore list|add <QQ> [group_id/global]|del <rule_id>"
+            "/feature list [group_id]：列出开关；"
+            "/feature status <feature> [group_id]：查看开关状态；"
+            "/feature enable <feature> <group_id/global>：开启功能；"
+            "/feature disable <feature> <group_id/global>：关闭功能；"
+            "/feature reset <feature> <group_id>：移除群级覆盖；"
+            "/feature ignore list：查看忽略规则；"
+            "/feature ignore add <QQ> [group_id/global]：添加忽略规则；"
+            "/feature ignore del <rule_id>：删除忽略规则"
         ),
         permission=PermissionLevel.SUPERUSER,
         ai_callable=False,

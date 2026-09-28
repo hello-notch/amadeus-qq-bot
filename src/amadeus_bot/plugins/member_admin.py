@@ -16,7 +16,7 @@ command_registry.register(
     CommandSpec(
         name="member",
         description="管理 MEMBER 权限名单",
-        usage="/member list | add <qq> | del <qq>",
+        usage=("/member list：查看 MEMBER；/member add <qq>：授予 MEMBER；/member del <qq>：移除 MEMBER"),
         permission=PermissionLevel.SUPERUSER,
         ai_callable=False,
     )

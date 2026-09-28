@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import shlex
-import time
-from collections import defaultdict, deque
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
@@ -14,6 +11,8 @@ from amadeus_bot.bootstrap import get_container
 from amadeus_bot.domain.commands import CommandSpec, command_registry
 from amadeus_bot.domain.permissions import PermissionLevel
 from amadeus_bot.plugins.common import event_group_id, onebot_message, reply_message_id
+from amadeus_bot.services.event_utils import reaction_target_message_id
+from amadeus_bot.services.interactions import interaction_pacer, parse_poke_request, poke_rate_limiter
 
 for spec in (
     CommandSpec(
@@ -31,35 +30,44 @@ for spec in (
         usage="/md <markdown>；或回复文字后 /md",
         permission=PermissionLevel.EVERYONE,
         feature="render",
-        ai_callable=True,
+        ai_callable=False,
         examples=("/md # 标题", "回复一条文字后发送 /md"),
         notes=("禁止渲染外链图片和原始 HTML；图片使用内容缓存",),
     ),
     CommandSpec(
         name="stick",
-        description="给被回复消息贴 QQ 表情",
-        usage="回复消息后 /stick <名称/ID>；/stick list [起始ID]",
+        description="给当前消息或被回复消息贴 QQ 表情",
+        usage=(
+            "/stick <名称/ID>：给当前消息贴表情；"
+            "回复消息后 /stick <名称/ID>：给被回复消息贴表情；"
+            "/stick list [起始ID]：查看表情 ID"
+        ),
         permission=PermissionLevel.EVERYONE,
         feature="stick",
         ai_callable=True,
         ai_delegate_member=True,
-        examples=("回复消息后 /stick 66", "/stick list", "/stick list 21"),
+        examples=("/stick 66", "回复消息后 /stick 66", "/stick list 21"),
         notes=(
-            "普通贴表情必须回复目标消息；可使用已验证别名或数字 emoji_id",
+            "不回复时给 /stick 命令消息本身贴表情；回复时给被回复消息贴表情",
+            "可使用已验证别名或数字 emoji_id",
+            "贴表情与戳一戳共享串行队列，每次操作之间至少间隔 0.3 秒",
             "list 每次展示 20 个连续 ID 及对应的 QQ 表情消息，可传起始 ID 翻页辨认",
             "已验证别名表位于 data/shared/emoji_ids.json",
         ),
     ),
     CommandSpec(
         name="poke",
-        description="戳一戳当前群友或好友",
-        usage="/poke <@user/qq> [n]",
-        permission=PermissionLevel.MEMBER,
+        description="戳一戳一个或多个群友/好友",
+        usage="/poke <@user/qq>... [n]；或 /poke <对象>... --count <n>",
+        permission=PermissionLevel.EVERYONE,
         feature="poke",
         ai_callable=True,
         ai_delegate_member=True,
-        examples=("/poke @某人", "/poke 123456789 3"),
-        notes=("单次 1～5 次，并受发起者和目标每分钟频率限制",),
+        examples=("/poke @某人 @另一人", "/poke 123456789 987654321 --count 3"),
+        notes=(
+            "每个对象单次 1～5 次，总计最多 8 次，并受发起者和目标每分钟频率限制",
+            "贴表情与戳一戳共享串行队列，每次操作之间至少间隔 0.3 秒",
+        ),
     ),
 ):
     command_registry.register(spec)
@@ -68,8 +76,6 @@ say_command = on_command("say", priority=5, block=True)
 md_command = on_command("md", priority=10, block=True)
 stick_command = on_command("stick", priority=10, block=True)
 poke_command = on_command("poke", priority=10, block=True)
-
-_poke_calls: defaultdict[str, deque[float]] = defaultdict(deque)
 
 
 @say_command.handle()
@@ -117,16 +123,19 @@ async def handle_stick(bot: Bot, event, arguments: Message = CommandArg()) -> No
             await stick_command.finish("起始 ID 必须在 1～999999。")
         await stick_command.finish(_emoji_list_message(start))
     if len(tokens) != 1:
-        await stick_command.finish("用法：回复消息后 /stick <名称/emoji_id>；或 /stick list")
-    message_id = reply_message_id(event)
+        await stick_command.finish("用法：/stick <名称/emoji_id>；或 /stick list")
+    message_id = reaction_target_message_id(event)
     if not message_id:
-        await stick_command.finish("请先回复需要贴表情的消息。")
+        await stick_command.finish("无法取得当前消息 ID。")
     try:
         emoji_id = _resolve_emoji_id(tokens[0], mapping)
     except ValueError as exc:
         await stick_command.finish(f"参数错误：{exc}")
     try:
-        await bot.call_api("set_msg_emoji_like", message_id=int(message_id), emoji_id=int(emoji_id), set=True)
+        async with interaction_pacer.slot("stick"):
+            await bot.call_api(
+                "set_msg_emoji_like", message_id=int(message_id), emoji_id=int(emoji_id), set=True
+            )
     except Exception as exc:
         await stick_command.finish(f"贴表情失败：{type(exc).__name__}；可能是 ID 不支持或消息已过期。")
     await stick_command.finish()
@@ -134,31 +143,30 @@ async def handle_stick(bot: Bot, event, arguments: Message = CommandArg()) -> No
 
 @poke_command.handle()
 async def handle_poke(bot: Bot, event, arguments: Message = CommandArg()) -> None:
-    if not get_container().permissions.has_role(event.get_user_id(), PermissionLevel.MEMBER):
-        await poke_command.finish("该命令需要 MEMBER 权限。")
     group_id = event_group_id(event)
     if group_id and not get_container().features.status("poke", group_id).enabled:
         await poke_command.finish("当前群已关闭戳一戳。")
-    tokens = shlex.split(arguments.extract_plain_text())
-    target = _target_user_id(arguments) or (tokens[0] if tokens and tokens[0].isdigit() else None)
-    count = int(tokens[-1]) if len(tokens) > 1 and tokens[-1].isdigit() else 1
-    if target is None or not 1 <= count <= 5:
-        await poke_command.finish("用法：/poke <@user/qq> [1-5]")
-    if not _allow_poke(event.get_user_id(), target, count):
+    try:
+        request = parse_poke_request(arguments)
+    except ValueError as exc:
+        await poke_command.finish(f"用法错误：{exc}。")
+    if not poke_rate_limiter.allow(event.get_user_id(), request.target_user_ids, request.count):
         await poke_command.finish("操作过于频繁，请稍后再试。")
     successes = 0
-    for _ in range(count):
-        try:
-            if group_id:
-                await bot.call_api("group_poke", group_id=int(group_id), user_id=int(target))
-            else:
-                await bot.call_api("friend_poke", user_id=int(target))
-            successes += 1
-        except Exception:
-            break
-        if count > 1:
-            await asyncio.sleep(0.7)
-    await poke_command.finish(f"戳一戳完成：成功 {successes}/{count} 次。")
+    for target in request.target_user_ids:
+        for _repeat in range(request.count):
+            try:
+                async with interaction_pacer.slot("poke"):
+                    if group_id:
+                        await bot.call_api("group_poke", group_id=int(group_id), user_id=int(target))
+                    else:
+                        await bot.call_api("friend_poke", user_id=int(target))
+                successes += 1
+            except Exception:
+                break
+    await poke_command.finish(
+        f"戳一戳完成：{len(request.target_user_ids)} 个对象，成功 {successes}/{request.total} 次。"
+    )
 
 
 def _emoji_list_message(start: int) -> Message:
@@ -187,23 +195,3 @@ def _resolve_emoji_id(value: str, mapping: dict) -> str:
         if lowered in names and item.get("status") == "verified":
             return str(item["emoji_id"])
     raise ValueError("未知表情名称；请用 /stick list 查看已验证别名，或直接提供数字 ID")
-
-
-def _target_user_id(message: Message) -> str | None:
-    for segment in message:
-        if segment.type == "at" and str(segment.data.get("qq", "")).isdigit():
-            return str(segment.data["qq"])
-    return None
-
-
-def _allow_poke(actor: str, target: str, count: int) -> bool:
-    now = time.monotonic()
-    for key in (f"actor:{actor}", f"target:{target}"):
-        queue = _poke_calls[key]
-        while queue and queue[0] < now - 60:
-            queue.popleft()
-        if len(queue) + count > 8:
-            return False
-    for key in (f"actor:{actor}", f"target:{target}"):
-        _poke_calls[key].extend([now] * count)
-    return True
