@@ -157,18 +157,15 @@ class AIToolService:
                 "从干什么、吃什么或推歌的独立池中推荐",
                 {
                     "pool": {"type": "string", "enum": ["activity", "food", "music"]},
-                    "path": {"type": "string"},
                 },
                 ["pool"],
             ),
             _function(
                 "recommend_add",
-                "以受限 AI_MEMBER_DELEGATE 为当前请求者添加共享推荐项",
+                "为当前请求者添加共享推荐项",
                 {
                     "pool": {"type": "string", "enum": ["activity", "food", "music"]},
-                    "path": {"type": "string"},
                     "content": {"type": "string"},
-                    "weight": {"type": "number", "exclusiveMinimum": 0},
                 },
                 ["pool", "content"],
             ),
@@ -394,7 +391,10 @@ class AIToolService:
                 if not self._feature_enabled("recommendation", context):
                     return _result(False, error="当前群已关闭推荐功能")
                 pool = _pool(arguments["pool"])
-                item = self.repository.choose_recommendation(pool, str(arguments.get("path") or ""))
+                command = "nowdo" if pool == "activity" else pool
+                if context.group_id and self.repository.command_disabled(context.group_id, command):
+                    return _result(False, error=f"[{command}]被关闭了~")
+                item = self.repository.choose_recommendation(pool)
                 return _result(
                     bool(item),
                     item=item.content if item else None,
@@ -404,15 +404,18 @@ class AIToolService:
                 if not self._feature_enabled("recommendation", context):
                     return _result(False, error="当前群已关闭推荐功能")
                 pool = _pool(arguments["pool"])
+                command = "nowdo" if pool == "activity" else pool
+                if context.group_id and self.repository.command_disabled(context.group_id, command):
+                    return _result(False, error=f"[{command}]被关闭了~")
                 item_id = self.repository.add_recommendation(
                     pool,
-                    str(arguments.get("path") or ""),
+                    "",
                     str(arguments["content"]),
-                    float(arguments.get("weight") or 1),
+                    1,
                     (),
                     context.requested_by,
                 )
-                return _result(True, recommendation_id=item_id, delegated_capability="AI_MEMBER_DELEGATE")
+                return _result(True, recommendation_id=item_id)
             if name == "course_list":
                 rows = self.courses.list(context.subject_user_id, arguments.get("weekday"))
                 return _result(

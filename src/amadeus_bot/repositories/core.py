@@ -18,6 +18,7 @@ class Recommendation:
     weight: float
     tags: tuple[str, ...]
     creator_id: str
+    image_path: str = ""
 
 
 class CoreRepository:
@@ -41,6 +42,37 @@ class CoreRepository:
     def list_members(self) -> list[str]:
         rows = self.database.fetch_all("SELECT user_id FROM members ORDER BY user_id")
         return [str(row["user_id"]) for row in rows]
+
+    def set_command_override(self, group_id: str, command: str, disabled: bool, actor: str) -> None:
+        with self.database.connection() as connection:
+            if disabled:
+                connection.execute(
+                    """INSERT INTO command_overrides(group_id, command, actor) VALUES (?, ?, ?)
+                    ON CONFLICT(group_id, command) DO UPDATE SET
+                    actor=excluded.actor, updated_at=CURRENT_TIMESTAMP""",
+                    (group_id, command, actor),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM command_overrides WHERE group_id=? AND command=?",
+                    (group_id, command),
+                )
+
+    def disabled_commands(self, group_id: str) -> set[str]:
+        return {
+            str(row["command"])
+            for row in self.database.fetch_all(
+                "SELECT command FROM command_overrides WHERE group_id=?", (group_id,)
+            )
+        }
+
+    def command_disabled(self, group_id: str, command: str) -> bool:
+        return (
+            self.database.fetch_one(
+                "SELECT 1 FROM command_overrides WHERE group_id=? AND command=?", (group_id, command)
+            )
+            is not None
+        )
 
     def set_feature(self, feature: str, scope_type: str, scope_id: str, enabled: bool, actor: str) -> None:
         self.database.execute(
@@ -122,13 +154,14 @@ class CoreRepository:
         weight: float,
         tags: tuple[str, ...],
         creator_id: str,
+        image_path: str = "",
     ) -> int:
         return self.database.execute(
             """
-            INSERT INTO recommendations(pool, path, content, weight, tags, creator_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO recommendations(pool, path, content, weight, tags, creator_id, image_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (pool, path, content, weight, json.dumps(tags, ensure_ascii=False), str(creator_id)),
+            (pool, path, content, weight, json.dumps(tags, ensure_ascii=False), str(creator_id), image_path),
         )
 
     def list_recommendations(self, pool: str, path: str = "") -> list[Recommendation]:
@@ -557,6 +590,7 @@ class CoreRepository:
             weight=float(row["weight"]),
             tags=tags,
             creator_id=str(row["creator_id"]),
+            image_path=str(row["image_path"]),
         )
 
 

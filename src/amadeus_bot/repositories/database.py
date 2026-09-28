@@ -17,6 +17,11 @@ class CoreDatabase:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
             connection.executescript(_SCHEMA)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(recommendations)")}
+            if "image_path" not in columns:
+                connection.execute(
+                    "ALTER TABLE recommendations ADD COLUMN image_path TEXT NOT NULL DEFAULT ''"
+                )
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -92,12 +97,21 @@ CREATE TABLE IF NOT EXISTS recommendations (
     weight REAL NOT NULL DEFAULT 1 CHECK(weight > 0),
     tags TEXT NOT NULL DEFAULT '',
     creator_id TEXT NOT NULL,
+    image_path TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_recommendations_pool ON recommendations(pool, enabled, deleted_at);
+
+CREATE TABLE IF NOT EXISTS command_overrides (
+    group_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(group_id, command)
+);
 
 CREATE TABLE IF NOT EXISTS ai_usage (
     usage_id INTEGER PRIMARY KEY AUTOINCREMENT,

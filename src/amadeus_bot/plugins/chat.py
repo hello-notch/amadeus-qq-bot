@@ -119,6 +119,8 @@ async def handle_proactive(bot: Bot, event) -> None:
     container = get_container()
     if not container.features.status("proactive_chat", group_id).enabled:
         return
+    if container.repository.command_disabled(group_id, "chat"):
+        return
     if container.features.is_ignored(event.get_user_id(), group_id, "ai"):
         return
     now = time.monotonic()
@@ -164,6 +166,12 @@ async def _respond(matcher, bot: Bot, event, text: str) -> None:
     group_id = event_group_id(event)
     if group_id and not container.features.status("chat", group_id).enabled:
         await matcher.finish("当前群已关闭聊天功能。")
+    if (
+        group_id
+        and container.repository.command_disabled(group_id, "chat")
+        and container.permissions.role_for(event.get_user_id()) != PermissionLevel.SUPERUSER
+    ):
+        await matcher.finish("[chat]被关闭了~")
     user_id = event.get_user_id()
     if container.features.is_ignored(user_id, group_id, "ai"):
         return

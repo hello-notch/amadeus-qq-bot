@@ -16,6 +16,7 @@ from amadeus_bot.services.ddl import DDLService
 from amadeus_bot.services.feature_flags import FeatureFlagService
 from amadeus_bot.services.memory import MemoryService
 from amadeus_bot.services.permission import PermissionService
+from amadeus_bot.services.recommendation_seeds import seed_recommendations
 from amadeus_bot.services.renderer import RenderService
 from amadeus_bot.services.tools import AIToolService
 
@@ -52,6 +53,7 @@ def build_container(superusers: set[str] | None = None, paths: AppPaths | None =
     database = CoreDatabase(app_paths.data / "core.sqlite3")
     database.initialize()
     repository = CoreRepository(database)
+    seed_recommendations(repository)
     user_repository = UserDataRepository(app_paths.data / "users")
     group_repository = GroupDataRepository(app_paths.data / "groups")
     ddl = DDLService(user_repository)

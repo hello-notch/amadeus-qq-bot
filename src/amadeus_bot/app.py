@@ -10,6 +10,7 @@ PLUGIN_MODULES = (
     "amadeus_bot.plugins.calc",
     "amadeus_bot.plugins.broadcast",
     "amadeus_bot.plugins.recommendations",
+    "amadeus_bot.plugins.command_overrides",
     "amadeus_bot.plugins.ddl",
     "amadeus_bot.plugins.member_admin",
     "amadeus_bot.plugins.utility",

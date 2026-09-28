@@ -47,7 +47,7 @@ async def test_ai_member_delegate_is_limited_to_registered_tool(tmp_path: Path) 
         )
     )
     assert added["success"] is True
-    assert added["delegated_capability"] == "AI_MEMBER_DELEGATE"
+    assert "delegated_capability" not in added
 
     rejected = json.loads(await tools.execute("feature_disable", {"feature": "chat"}, context))
     assert rejected["success"] is False

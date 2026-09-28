@@ -33,14 +33,26 @@ help_command = on_command("help", aliases={"帮助"}, priority=10, block=True)
 HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("基础与 AI", ("help", "chat", "history", "calc", "health", "md")),
     ("个人事务", ("ddl", "course", "memory", "privacy")),
-    ("推荐", ("nowdo", "food", "music", "recommend")),
+    ("推荐", ("nowdo", "food", "music")),
     ("群聊内容", ("stats", "summary", "quote")),
     ("群友 wife", ("wife", "changewife", "showwife", "marry")),
     ("校园服务", ("portal", "activity")),
     ("互动", ("stick", "poke")),
     (
         "开发者管理",
-        ("member", "feature", "broadcast", "data", "log", "model", "ai-cost", "ai-quota", "say"),
+        (
+            "member",
+            "feature",
+            "enable",
+            "disable",
+            "broadcast",
+            "data",
+            "log",
+            "model",
+            "ai-cost",
+            "ai-quota",
+            "say",
+        ),
     ),
 )
 
@@ -71,7 +83,7 @@ async def handle_help(matcher: Matcher, event, arguments: Message = CommandArg()
             await matcher.finish(f"没有找到你当前可用的命令：{target}")
         await _finish_help_image(
             matcher,
-            _format_detail(spec),
+            _format_detail(spec, group_id),
             title=f"帮助 · /{spec.name}",
             variant=f"detail:{spec.name}",
         )
@@ -94,6 +106,10 @@ async def prewarm_help_images() -> None:
         for row in container.repository.get_feature_rows()
         if row.get("scope_type") == "group" and row.get("scope_id")
     }
+    group_ids.update(
+        str(row["group_id"])
+        for row in container.database.fetch_all("SELECT DISTINCT group_id FROM command_overrides")
+    )
     # The sentinel represents a group with no per-group overrides. Because the
     # renderer key includes content, ordinary groups reuse this exact image.
     scopes: tuple[str | None, ...] = (None, "__default__", *sorted(group_ids))
@@ -111,7 +127,8 @@ async def prewarm_help_images() -> None:
                         )
                     )
     for spec in command_registry.all():
-        requests.append((_format_detail(spec), f"帮助 · /{spec.name}", f"detail:{spec.name}"))
+        for group_id in scopes:
+            requests.append((_format_detail(spec, group_id), f"帮助 · /{spec.name}", f"detail:{spec.name}"))
     results = await asyncio.gather(
         *(
             container.renderer.render_text(text, title=title, variant=variant)
@@ -166,14 +183,14 @@ def _format_overview(role: PermissionLevel, group_id: str | None, *, include_sup
             continue
         lines.append(f"【{title}】")
         for spec in specs:
-            lines.extend(_overview_lines(spec))
+            lines.extend(_overview_lines(spec, group_id))
             included.add(spec.name)
         lines.append("")
     remaining = [spec for spec in visible if spec.name not in included]
     if remaining:
         lines.append("【其他】")
         for spec in remaining:
-            lines.extend(_overview_lines(spec))
+            lines.extend(_overview_lines(spec, group_id))
         lines.append("")
     lines.extend(
         (
@@ -186,10 +203,14 @@ def _format_overview(role: PermissionLevel, group_id: str | None, *, include_sup
     return "\n".join(lines)
 
 
-def _overview_lines(spec: CommandSpec) -> list[str]:
+def _overview_lines(spec: CommandSpec, group_id: str | None = None) -> list[str]:
     aliases = f"（别名：{'、'.join('/' + item for item in spec.aliases)}）" if spec.aliases else ""
     ai = "  🔧" if spec.ai_callable else ""
-    return [f"/{spec.name}{ai} {aliases}", f"  {spec.description}｜{spec.permission.value}"]
+    disabled = bool(group_id and spec.name in get_container().repository.disabled_commands(group_id))
+    return [
+        f"/{spec.name}{ai} {aliases}{' [已关闭]' if disabled else ''}",
+        f"  {spec.description}｜{'SUPERUSER（临时）' if disabled else spec.permission.value}",
+    ]
 
 
 def _visible(spec: CommandSpec, role: PermissionLevel, group_id: str | None) -> bool:
@@ -201,14 +222,15 @@ def _visible(spec: CommandSpec, role: PermissionLevel, group_id: str | None) -> 
     return True
 
 
-def _format_detail(spec: CommandSpec) -> str:
+def _format_detail(spec: CommandSpec, group_id: str | None = None) -> str:
+    disabled = bool(group_id and spec.name in get_container().repository.disabled_commands(group_id))
     lines = [
         f"命令：/{spec.name}",
         f"说明：{spec.description}",
         "用法：",
         *("  " + item.strip() for item in spec.usage.replace("；", "\n").splitlines() if item.strip()),
         "",
-        f"权限：{spec.permission.value}",
+        f"权限：{'SUPERUSER（当前群已关闭）' if disabled else spec.permission.value}",
         f"AI 调用：{'是' if spec.ai_callable else '否'}",
     ]
     if spec.aliases:
