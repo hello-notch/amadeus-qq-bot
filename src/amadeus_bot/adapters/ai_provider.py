@@ -29,6 +29,7 @@ class ProviderConfig:
     api_prefix: str
     api_mode: str = "chat_completions"
     responses_stream: bool = False
+    thinking_enabled: bool = True
     models: tuple[str, ...] = ()
 
 
@@ -114,6 +115,8 @@ class OpenAICompatibleProvider:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if not self.config.thinking_enabled:
+            payload["thinking"] = {"type": "disabled"}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

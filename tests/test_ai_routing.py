@@ -35,6 +35,9 @@ def test_route_catalog_assigns_cheap_and_quality_models() -> None:
         "deepseek-v4-flash-vision-exp",
     )
     assert set(catalog.providers) == {"deepseek"}
+    assert catalog.providers["deepseek"].thinking_enabled is False
+    assert catalog.routes[AITask.SUMMARY].max_tokens == 16384
+    assert catalog.routes[AITask.STATS_ANALYSIS].max_tokens == 16384
 
 
 def test_responses_input_converts_image_url_to_input_image() -> None:
@@ -119,6 +122,41 @@ async def test_chat_provider_rejects_reasoning_only_response() -> None:
             )
     finally:
         await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_provider_disables_thinking_when_configured() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    provider = OpenAICompatibleProvider(
+        ProviderConfig(
+            name="deepseek",
+            credential_host="api.deepseek.com",
+            api_prefix="",
+            thinking_enabled=False,
+            models=("deepseek-v4-flash",),
+        ),
+        ApiCredential("https://api.deepseek.com", "test-key"),
+    )
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await provider.complete(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": "test"}],
+            temperature=0.2,
+            max_tokens=16384,
+        )
+    finally:
+        await provider.close()
+
+    assert result.content == "OK"
+    assert captured["thinking"] == {"type": "disabled"}
+    assert captured["max_tokens"] == 16384
 
 
 def test_responses_input_uses_typed_content_and_replays_output_items() -> None:

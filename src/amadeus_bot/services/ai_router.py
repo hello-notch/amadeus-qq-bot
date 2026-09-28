@@ -37,6 +37,7 @@ class AIRouteCatalog:
                 api_prefix=str(values.get("api_prefix", "")),
                 api_mode=str(values.get("api_mode", "chat_completions")),
                 responses_stream=bool(values.get("responses_stream", False)),
+                thinking_enabled=bool(values.get("thinking_enabled", True)),
                 models=tuple(str(item) for item in values.get("models", [])),
             )
             for name, values in raw.get("providers", {}).items()

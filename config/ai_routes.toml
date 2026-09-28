@@ -2,6 +2,7 @@
 credential_host = "api.deepseek.com"
 api_prefix = ""
 api_mode = "chat_completions"
+thinking_enabled = false
 models = [
     "deepseek-v4-flash",
     "deepseek-v4-pro",
@@ -33,13 +34,13 @@ max_tokens = 120
 primary = "deepseek/deepseek-v4-flash"
 fallbacks = ["deepseek/deepseek-v4-pro"]
 temperature = 0.2
-max_tokens = 4096
+max_tokens = 16384
 
 [tasks.stats_analysis]
 primary = "deepseek/deepseek-v4-flash"
 fallbacks = ["deepseek/deepseek-v4-pro"]
 temperature = 0.2
-max_tokens = 4096
+max_tokens = 16384
 
 [tasks.memory_extraction]
 primary = "deepseek/deepseek-v4-flash"
