@@ -128,7 +128,7 @@ async def handle_proactive(bot: Bot, event) -> None:
     times = _proactive_times[group_id]
     while times and times[0] < now - 600:
         times.popleft()
-    if len(times) >= 2 or (times and now - times[-1] < 60):
+    if len(times) >= 4 or (times and now - times[-1] < 30):
         return
     score = _proactive_score(text, group_id, now)
     if score < 2:

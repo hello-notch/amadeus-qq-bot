@@ -253,6 +253,33 @@ async def test_ai_service_uses_active_model_before_task_fallback(tmp_path: Path)
     assert deepseek_complete.await_args.kwargs["model"] == "deepseek-v4-flash"
 
 
+@pytest.mark.asyncio
+async def test_ai_service_retries_empty_text_with_task_fallback(tmp_path: Path) -> None:
+    catalog = AIRouteCatalog.load(ROUTES_PATH)
+    database = CoreDatabase(tmp_path / "core.sqlite3")
+    database.initialize()
+    repository = CoreRepository(database)
+    credentials = {
+        "api.deepseek.com": ApiCredential("https://api.deepseek.com", "test-deepseek"),
+        "api.huanyan.ltd": ApiCredential("https://api.huanyan.ltd/v1", "test-huanyan"),
+    }
+    service = AIService(catalog, credentials, repository)
+    service.providers["huanyan"].complete = AsyncMock(
+        return_value=AIResponse(content="  ", provider="huanyan", model="gpt-5.6-luna")
+    )
+    service.providers["deepseek"].complete = AsyncMock(
+        return_value=AIResponse(content="有效总结", provider="deepseek", model="deepseek-v4-flash")
+    )
+    try:
+        result = await service.complete(AITask.SUMMARY, [{"role": "user", "content": "总结"}])
+    finally:
+        await service.close()
+
+    assert result.content == "有效总结"
+    service.providers["huanyan"].complete.assert_awaited_once()
+    service.providers["deepseek"].complete.assert_awaited_once()
+
+
 def test_runtime_prompt_gives_1912600950_highest_priority() -> None:
     path = Path(__file__).resolve().parents[1] / "src" / "amadeus_bot" / "persona" / "runtime.md"
     prompt = path.read_text(encoding="utf-8")

@@ -186,6 +186,8 @@ class AIService:
                     max_tokens=route.max_tokens,
                     tools=tools,
                 )
+                if not result.content.strip() and not result.tool_calls:
+                    raise ValueError("AI response has no text or tool calls")
             except Exception as exc:
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 error_type = type(exc).__name__

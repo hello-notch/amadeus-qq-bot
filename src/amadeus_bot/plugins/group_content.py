@@ -116,6 +116,8 @@ async def handle_stats(event, arguments: Message = CommandArg()) -> None:
             user_id=event.get_user_id(),
         )
         analysis = result.content.strip()
+        if not analysis:
+            raise ValueError("AI analysis is empty")
     except Exception:
         analysis = "AI 分析暂不可用；确定性统计不受影响。"
     await finish_text_or_image(
@@ -152,6 +154,8 @@ async def handle_summary(event, arguments: Message = CommandArg()) -> None:
             group_id=group_id,
             user_id=event.get_user_id(),
         )
+        if not result.content.strip():
+            raise ValueError("AI summary is empty")
     except Exception:
         await summary_command.finish("AI 总结服务暂不可用。")
     heading = (
