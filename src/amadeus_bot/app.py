@@ -23,6 +23,7 @@ PLUGIN_MODULES = (
     "amadeus_bot.plugins.issue_report",
     "amadeus_bot.plugins.data_admin",
     "amadeus_bot.plugins.feature_admin",
+    "amadeus_bot.plugins.model_admin",
     "amadeus_bot.plugins.health",
     "amadeus_bot.plugins.chat",
     "amadeus_bot.plugins.scheduler",

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 
 import httpx
 from nonebot import on_command
-from nonebot.adapters.onebot.v11 import Bot, Message
+from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.params import CommandArg
 
 from amadeus_bot.bootstrap import get_container
@@ -13,23 +14,33 @@ from amadeus_bot.domain.commands import CommandSpec, command_registry
 from amadeus_bot.domain.permissions import PermissionLevel
 from amadeus_bot.plugins.common import (
     event_group_id,
-    finish_text_or_image,
     onebot_message,
     reply_message_id,
 )
-from amadeus_bot.services.campus import ActivitySource, PortalSource
+from amadeus_bot.services.campus import (
+    ActivitySource,
+    PortalSource,
+    format_activity_time,
+    format_source_timestamp,
+)
 
 for spec in (
     CommandSpec(
         name="portal",
         description="查询和订阅北邮信息门户校内通知",
-        usage="/portal [N] | search <关键词> [N] | sub on/off | group-sub on/off | refresh",
+        usage=(
+            "/portal [1-5]：查看通知列表；/portal <wbnewsid>：查看通知详情；"
+            "/portal search <关键词> [N]：搜索通知；"
+            "/portal sub on/off：订阅本人推送；"
+            "/portal group-sub on/off：管理群推送（仅 SUPERUSER）；"
+            "/portal refresh：刷新通知（仅 SUPERUSER）"
+        ),
         permission=PermissionLevel.EVERYONE,
         feature="portal",
         ai_callable=True,
-        examples=("/portal 5", "/portal search 奖学金 10", "/portal sub on"),
+        examples=("/portal 2", "/portal 123456", "/portal sub on"),
         notes=(
-            "N 最大为 20；不写参数时显示最近 10 条缓存通知",
+            "列表每页 10 条，最多 5 页；通知 ID 详情才以文字发送可点击链接",
             "sub 管理本人每日私聊推送；group-sub 和 refresh 仅 SUPERUSER 可用",
             "列表来自只读抓取缓存，登录失效时可由 Playwright 自动续登",
         ),
@@ -37,7 +48,12 @@ for spec in (
     CommandSpec(
         name="activity",
         description="只读查询和订阅北邮第二课堂活动",
-        usage="/activity [N] [--category c] [--campus c] | search <关键词> | sub/group-sub on/off",
+        usage=(
+            "/activity [N] [--category c] [--campus c]：查看活动；"
+            "/activity search <关键词>：搜索活动；"
+            "/activity sub on/off：订阅本人推送；"
+            "/activity group-sub on/off：管理群推送（仅 SUPERUSER）"
+        ),
         permission=PermissionLevel.EVERYONE,
         feature="activity",
         ai_callable=True,
@@ -69,6 +85,8 @@ async def handle_portal(event, arguments: Message = CommandArg()) -> None:
 async def handle_activity(bot: Bot, event, arguments: Message = CommandArg()) -> None:
     tokens = shlex.split(arguments.extract_plain_text())
     if tokens and tokens[0] == "import-file":
+        if os.getenv("AMADEUS_SIMULATOR_ROOT"):
+            await activity_command.finish("模拟器不下载外部文件。")
         if get_container().permissions.role_for(event.get_user_id()) != PermissionLevel.SUPERUSER:
             await activity_command.finish("活动导入仅 SUPERUSER 可用。")
         reply_id = reply_message_id(event)
@@ -117,6 +135,47 @@ async def _handle_source(source: str, matcher, event, arguments: Message) -> Non
     if tokens and tokens[0] in {"sub", "group-sub"}:
         await _subscription(source, matcher, event, tokens)
         return
+    if source == "portal" and (not tokens or tokens[0] != "search"):
+        if len(tokens) > 1 or (tokens and not tokens[0].isdigit()):
+            await matcher.finish("用法：/portal [1-5] 或 /portal <wbnewsid>")
+        repository = get_container().repository
+        if tokens and int(tokens[0]) > 5:
+            row = repository.get_source_item("portal", tokens[0])
+            if row is None:
+                await matcher.finish("未找到该 wbnewsid 对应的缓存通知。")
+            await matcher.finish(
+                f"{row['title']}\n发送单位：{row.get('department') or '未知'}\n"
+                f"日期：{row.get('published_at') or '未知'}\n"
+                f"链接：{row.get('url') or '暂无'}"
+            )
+        page = int(tokens[0]) if tokens else 1
+        if not 1 <= page <= 5:
+            await matcher.finish("页码只能为 1–5。")
+        rows = repository.query_source_items("portal", limit=10, offset=(page - 1) * 10)
+        if not rows:
+            health = repository.get_source_health("portal")
+            if health and health.get("consecutive_failures"):
+                await matcher.finish("信息门户最近刷新失败，当前页没有可显示的缓存通知。")
+            await matcher.finish("当前页没有缓存通知。")
+        health = repository.get_source_health("portal")
+        updated = health.get("last_success_at") if health else None
+        entries = [
+            (
+                f"{(page - 1) * 10 + index:02d}",
+                row["title"],
+                f"{row.get('department') or '单位未知'}  ·  {row.get('published_at') or '日期未知'}"
+                f"  ·  wbnewsid {row['item_id']}",
+            )
+            for index, row in enumerate(rows, 1)
+        ]
+        path = await get_container().renderer.render_rows(
+            entries,
+            title="信息门户 · 校内通知",
+            subtitle=f"第 {page} 页 / 最多 5 页",
+            footer=f"最近更新：{format_source_timestamp(updated)} · /portal <wbnewsid> 查看链接",
+            variant=f"portal:page:{page}",
+        )
+        await matcher.finish(MessageSegment.image(path.resolve().as_uri()))
     query = ""
     limit = 10
     if tokens and tokens[0] == "search":
@@ -127,11 +186,11 @@ async def _handle_source(source: str, matcher, event, arguments: Message) -> Non
             limit = min(20, int(tokens[2]))
     elif tokens and tokens[0].isdigit():
         limit = min(20, int(tokens[0]))
-    rows = get_container().repository.query_source_items(source, query, limit)
+    rows = get_container().repository.query_source_items(source, query, 50 if source == "activity" else limit)
     if source == "activity":
         category = _option(tokens, "--category")
         campus = _option(tokens, "--campus")
-        rows = [row for row in rows if _metadata_matches(row, category, campus)]
+        rows = [row for row in rows if _metadata_matches(row, category, campus)][:limit]
     if not rows:
         health = get_container().repository.get_source_health(source)
         if (
@@ -149,16 +208,66 @@ async def _handle_source(source: str, matcher, event, arguments: Message) -> Non
             else "请让 SUPERUSER 先 refresh。"
         )
         await matcher.finish("暂无缓存数据。" + suffix)
-    text = "\n\n".join(_format_source_item(source, row) for row in rows)
+    health = get_container().repository.get_source_health(source)
+    updated = health.get("last_success_at") if health else None
     if source == "portal":
-        # Portal entries contain actionable URLs, so they must remain clickable.
-        await matcher.finish(text)
-    await finish_text_or_image(
-        matcher,
-        text,
-        title="第二课堂",
-        force_image=True,
+        entries = [
+            (
+                f"{index:02d}",
+                row["title"],
+                f"{row.get('department') or '单位未知'} · {row.get('published_at') or '日期未知'}"
+                f" · wbnewsid {row['item_id']}",
+            )
+            for index, row in enumerate(rows, 1)
+        ]
+    else:
+        path = await get_container().renderer.render_activities(
+            [_activity_display_item(row) for row in rows],
+            subtitle=f"匹配 {len(rows)} 条" if query else f"最近 {len(rows)} 条",
+            updated=format_source_timestamp(updated),
+        )
+        await matcher.finish(MessageSegment.image(path.resolve().as_uri()))
+    path = await get_container().renderer.render_rows(
+        entries,
+        title="信息门户 · 搜索" if source == "portal" else "第二课堂 · 活动",
+        subtitle=f"匹配 {len(rows)} 条" if query else f"最近 {len(rows)} 条",
+        footer=f"最近更新：{format_source_timestamp(updated)}"
+        + (" · /portal <wbnewsid> 查看链接" if source == "portal" else ""),
+        variant=f"{source}:results",
     )
+    await matcher.finish(MessageSegment.image(path.resolve().as_uri()))
+
+
+def _activity_display_item(row: dict) -> dict:
+    metadata = json.loads(row.get("metadata") or "{}")
+    campus = str(metadata.get("campus") or "")
+    location = str(metadata.get("location") or "")
+    # Old cached rows could have stored "校区 · 地点" in campus.
+    if campus and campus in location:
+        place = location
+    elif location and location in campus:
+        place = campus
+    else:
+        place = " · ".join(part for part in (campus, location) if part)
+    statuses = [part.strip() for part in str(metadata.get("status") or "").split(" · ") if part.strip()]
+    registration = ""
+    if "需报名" in statuses:
+        start = format_activity_time(metadata.get("registration_start"))
+        end = format_activity_time(metadata.get("registration_end"))
+        registration = f"{start} 至 {end}"
+    when = format_activity_time(row.get("published_at"))
+    event_end = metadata.get("event_end")
+    if event_end and format_activity_time(event_end) != when:
+        when = f"{when} 至 {format_activity_time(event_end)}"
+    organizer = row.get("department") or ""
+    return {
+        "title": row["title"],
+        "when": when,
+        "category": " · ".join(part for part in (metadata.get("category"), organizer) if part) or "第二课堂",
+        "place": place or "地点未知",
+        "statuses": statuses or ["状态未知"],
+        "registration": registration,
+    }
 
 
 async def _subscription(source: str, matcher, event, tokens: list[str]) -> None:
@@ -178,20 +287,6 @@ async def _subscription(source: str, matcher, event, tokens: list[str]) -> None:
         source, scope_type, scope_id, tokens[1] == "on", event.get_user_id(), filters
     )
     await matcher.finish(f"已将 {source} {scope_type} 订阅设为 {tokens[1]}。")
-
-
-def _format_source_item(source: str, row: dict) -> str:
-    metadata = json.loads(row.get("metadata") or "{}")
-    extra = ""
-    if source == "activity":
-        extra = (
-            f"\n类别：{metadata.get('category') or '-'}｜校区：{metadata.get('campus') or '-'}"
-            f"｜地点：{metadata.get('location') or '-'}｜状态：{metadata.get('status') or '-'}"
-        )
-    return (
-        f"{row['title']}\n{row.get('department') or '-'}｜{row.get('published_at') or '时间未知'}"
-        f"{extra}\n{row.get('summary') or ''}\n{row.get('url') or ''}"
-    ).strip()
 
 
 def _metadata_matches(row: dict, category: str | None, campus: str | None) -> bool:

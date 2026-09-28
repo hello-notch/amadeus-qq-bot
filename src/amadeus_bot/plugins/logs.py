@@ -17,8 +17,10 @@ command_registry.register(
         name="log",
         description="查看消息、回复、通知、AI 工具和错误活动日志",
         usage=(
-            "/log [recent] [N] | status | user <QQ> [N] | group <群号> [N] | "
-            "kind <inbound/outbound/notice/ai_reply/tool/error> [N] | trace <trace_id> | errors [N]"
+            "/log [recent] [N]：查看最近活动；/log status：查看日志状态；"
+            "/log user <QQ> [N]：按用户筛选；/log group <群号> [N]：按群筛选；"
+            "/log kind <类型> [N]：按活动类型筛选；"
+            "/log trace <trace_id>：追踪请求；/log errors [N]：查看错误"
         ),
         permission=PermissionLevel.SUPERUSER,
         feature="logs",

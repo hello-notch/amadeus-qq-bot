@@ -38,6 +38,16 @@ def reply_message_id(event: Any) -> str | None:
     return None
 
 
+def reaction_target_message_id(event: Any) -> str | None:
+    """Use the replied-to message when present, otherwise the command message itself."""
+
+    replied = reply_message_id(event)
+    if replied is not None:
+        return replied
+    current = getattr(event, "message_id", None)
+    return str(current) if current is not None else None
+
+
 def onebot_message(value: Any) -> Message:
     """Normalize the different ``get_msg`` message payload shapes.
 
@@ -58,3 +68,21 @@ def onebot_message(value: Any) -> Message:
             for item in value
         ]
     return Message(value)
+
+
+def cq_message_text(value: Any) -> str:
+    """Render a OneBot message as CQ text so non-text segments remain visible to AI."""
+
+    return str(onebot_message(value))
+
+
+def ai_event_text(event: Any, plain_text: str | None = None) -> str:
+    """Build the text submitted to AI with both plaintext and the original CQ message."""
+
+    plain = event.get_plaintext() if plain_text is None else plain_text
+    cq_text = cq_message_text(event.get_message())
+    parts = [f"纯文本：{plain}", f"CQ消息：{cq_text}"]
+    replied = reply_message_id(event)
+    if replied is not None:
+        parts.append(f"回复目标消息 ID：{replied}")
+    return "\n".join(parts)

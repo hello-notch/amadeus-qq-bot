@@ -1,6 +1,31 @@
 [providers.deepseek]
 credential_host = "api.deepseek.com"
 api_prefix = ""
+api_mode = "chat_completions"
+models = [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash-vision-exp",
+]
+
+[providers.huanyan]
+credential_host = "api.huanyan.ltd"
+api_prefix = ""
+api_mode = "responses"
+responses_stream = true
+models = [
+    "codex-auto-review",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-sol-wm",
+    "gpt-5.6-terra",
+]
+
+[runtime]
+default_model = "huanyan/gpt-5.6-luna"
 
 [tasks.chat]
 primary = "deepseek/deepseek-v4-flash"
@@ -40,7 +65,7 @@ max_tokens = 700
 
 [tasks.vision]
 primary = "deepseek/deepseek-v4-flash-vision-exp"
-fallbacks = ["deepseek/deepseek-v4-pro"]
+fallbacks = []
 temperature = 0.2
 max_tokens = 1000
 

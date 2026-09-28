@@ -182,6 +182,24 @@ class UserDataRepository:
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(ddl)")}
             if "reminder_sent_at_utc" not in columns:
                 connection.execute("ALTER TABLE ddl ADD COLUMN reminder_sent_at_utc TEXT")
+            course_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(courses)")}
+            if "selection_state" not in course_columns:
+                connection.execute(
+                    "ALTER TABLE courses ADD COLUMN selection_state TEXT NOT NULL DEFAULT 'selected'"
+                )
+            prompt_indexes = {
+                str(row[1]) for row in connection.execute("PRAGMA index_list(course_conflict_prompts)")
+            }
+            if "idx_course_conflict_one_prompt" not in prompt_indexes:
+                connection.execute(
+                    "DELETE FROM course_conflict_prompts WHERE rowid NOT IN "
+                    "(SELECT rowid FROM course_conflict_prompts "
+                    "ORDER BY created_at_utc DESC, rowid DESC LIMIT 1)"
+                )
+                # Each user has a separate database; the constant index permits only one prompt.
+                connection.execute(
+                    "CREATE UNIQUE INDEX idx_course_conflict_one_prompt ON course_conflict_prompts ((1))"
+                )
             try:
                 yield connection
                 connection.commit()
@@ -258,7 +276,8 @@ CREATE TABLE IF NOT EXISTS courses (
     import_batch_id TEXT,
     created_at_utc TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at_utc TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    deleted_at_utc TEXT
+    deleted_at_utc TEXT,
+    selection_state TEXT NOT NULL DEFAULT 'selected'
 );
 CREATE INDEX IF NOT EXISTS idx_courses_weekday ON courses(weekday, deleted_at_utc);
 CREATE TABLE IF NOT EXISTS course_reminder_deliveries (
@@ -266,5 +285,12 @@ CREATE TABLE IF NOT EXISTS course_reminder_deliveries (
     occurrence_date TEXT NOT NULL,
     sent_at_utc TEXT NOT NULL,
     PRIMARY KEY(course_id, occurrence_date)
+);
+CREATE TABLE IF NOT EXISTS course_conflict_prompts (
+    message_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """

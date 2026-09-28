@@ -26,10 +26,11 @@ class QuoteRecord:
     source_author_id: str
     saved_by_id: str
     name: str
-    tags: tuple[str, ...]
     text: str
     media_refs: tuple[dict[str, str], ...]
     created_at: str
+    source_author_name: str = ""
+    saved_by_name: str = ""
 
 
 class GroupDataRepository:
@@ -50,6 +51,10 @@ class GroupDataRepository:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA busy_timeout=5000")
             connection.executescript(_GROUP_SCHEMA)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(quotes)")}
+            for column in ("source_author_name", "saved_by_name"):
+                if column not in columns:
+                    connection.execute(f"ALTER TABLE quotes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             try:
                 yield connection
                 connection.commit()
@@ -149,9 +154,11 @@ class GroupDataRepository:
         source_author_id: str,
         saved_by_id: str,
         name: str,
-        tags: tuple[str, ...],
         text: str,
         media_refs: tuple[dict[str, str], ...] = (),
+        *,
+        source_author_name: str = "",
+        saved_by_name: str = "",
     ) -> QuoteRecord:
         with self.connection(group_id) as connection:
             existing = connection.execute(
@@ -163,17 +170,19 @@ class GroupDataRepository:
             cursor = connection.execute(
                 """
                 INSERT INTO quotes(
-                    source_message_id,source_author_id,saved_by_id,name,tags,text,media_refs
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    source_message_id,source_author_id,saved_by_id,name,text,media_refs,
+                    source_author_name,saved_by_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(source_message_id),
                     str(source_author_id),
                     str(saved_by_id),
                     name,
-                    json.dumps(tags, ensure_ascii=False),
                     text,
                     json.dumps(media_refs, ensure_ascii=False),
+                    source_author_name,
+                    saved_by_name,
                 ),
             )
             quote_id = int(cursor.lastrowid)
@@ -196,10 +205,10 @@ class GroupDataRepository:
                 rows = connection.execute(
                     """
                     SELECT * FROM quotes WHERE deleted_at IS NULL AND
-                    (text LIKE ? OR name LIKE ? OR tags LIKE ? OR source_author_id=?)
+                    (text LIKE ? OR name LIKE ? OR source_author_id=? OR source_author_name LIKE ?)
                     ORDER BY quote_id DESC
                     """,
-                    (pattern, pattern, pattern, query.lstrip("@")),
+                    (pattern, pattern, query.lstrip("@"), pattern),
                 ).fetchall()
             else:
                 rows = connection.execute(
@@ -211,14 +220,14 @@ class GroupDataRepository:
         rows = self.list_quotes(group_id, query)
         return random.choice(rows) if rows else None
 
-    def edit_quote(self, group_id: str, quote_id: int, name: str, tags: tuple[str, ...]) -> bool:
+    def edit_quote(self, group_id: str, quote_id: int, name: str) -> bool:
         with self.connection(group_id) as connection:
             cursor = connection.execute(
                 """
-                UPDATE quotes SET name=?, tags=?, updated_at=CURRENT_TIMESTAMP
+                UPDATE quotes SET name=?, updated_at=CURRENT_TIMESTAMP
                 WHERE quote_id=? AND deleted_at IS NULL
                 """,
-                (name, json.dumps(tags, ensure_ascii=False), int(quote_id)),
+                (name, int(quote_id)),
             )
             return cursor.rowcount > 0
 
@@ -247,10 +256,11 @@ class GroupDataRepository:
             str(row["source_author_id"]),
             str(row["saved_by_id"]),
             str(row["name"]),
-            tuple(json.loads(row["tags"] or "[]")),
             str(row["text"]),
             tuple(json.loads(row["media_refs"] or "[]")),
             str(row["created_at"]),
+            str(row["source_author_name"]),
+            str(row["saved_by_name"]),
         )
 
 
@@ -270,9 +280,10 @@ CREATE TABLE IF NOT EXISTS quotes (
     source_author_id TEXT NOT NULL,
     saved_by_id TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
-    tags TEXT NOT NULL DEFAULT '[]',
     text TEXT NOT NULL DEFAULT '',
     media_refs TEXT NOT NULL DEFAULT '[]',
+    source_author_name TEXT NOT NULL DEFAULT '',
+    saved_by_name TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at TEXT

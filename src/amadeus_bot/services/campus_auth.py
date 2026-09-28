@@ -26,7 +26,7 @@ class CampusAuthenticator:
 
     @property
     def available(self) -> bool:
-        return self.password_file.is_file()
+        return not os.getenv("AMADEUS_SIMULATOR_ROOT") and self.password_file.is_file()
 
     async def login_portal(self) -> None:
         account, password = self._load_credentials()
@@ -184,6 +184,8 @@ class CampusAuthenticator:
                 await browser.close()
 
     def _load_credentials(self) -> tuple[str, str]:
+        if os.getenv("AMADEUS_SIMULATOR_ROOT"):
+            raise RuntimeError("模拟器不执行校园自动续登")
         if not self.password_file.is_file():
             raise RuntimeError(f"自动登录凭据文件不存在：{self.password_file}")
         lines = self.password_file.read_text(encoding="utf-8-sig").splitlines()
@@ -201,9 +203,7 @@ class CampusAuthenticator:
 
     @staticmethod
     def _portal_headless() -> bool:
-        # BUPT CAS currently returns HTTP 400 for its login iframe in headless
-        # Chromium. The window only appears when the portal session has expired.
-        return os.getenv("AMADEUS_PORTAL_BROWSER_HEADLESS", "false").strip().lower() not in {
+        return os.getenv("AMADEUS_PORTAL_BROWSER_HEADLESS", "true").strip().lower() not in {
             "0",
             "false",
             "no",
@@ -211,9 +211,7 @@ class CampusAuthenticator:
 
     @staticmethod
     def _activity_headless() -> bool:
-        # The site's verification widget may reject headless login. The window
-        # appears only while an expired token is being renewed.
-        return os.getenv("AMADEUS_ACTIVITY_BROWSER_HEADLESS", "false").strip().lower() not in {
+        return os.getenv("AMADEUS_ACTIVITY_BROWSER_HEADLESS", "true").strip().lower() not in {
             "0",
             "false",
             "no",

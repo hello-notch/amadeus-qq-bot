@@ -21,6 +21,10 @@ class ModelTarget:
     provider: str
     model: str
 
+    @property
+    def qualified_name(self) -> str:
+        return f"{self.provider}/{self.model}"
+
     @classmethod
     def parse(cls, value: str) -> ModelTarget:
         provider, separator, model = value.partition("/")
@@ -49,8 +53,10 @@ class AIResponse:
     content: str
     provider: str
     model: str
+    response_id: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
     raw_usage: dict[str, Any] = field(default_factory=dict)
     tool_calls: tuple[ToolCall, ...] = ()
+    output_items: tuple[dict[str, Any], ...] = ()

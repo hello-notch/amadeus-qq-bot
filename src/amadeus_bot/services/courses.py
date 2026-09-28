@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ class CourseRecord:
     location: str
     teacher: str
     reminder_minutes: int | None
+    selection_state: str = "selected"
 
 
 @dataclass(slots=True)
@@ -96,17 +98,36 @@ class CourseService:
         with self.repository.connection(user_id) as connection:
             if weekday is None:
                 rows = connection.execute(
-                    "SELECT * FROM courses WHERE deleted_at_utc IS NULL ORDER BY weekday,start_section"
+                    "SELECT * FROM courses WHERE deleted_at_utc IS NULL AND selection_state='selected' "
+                    "ORDER BY weekday,start_section"
                 ).fetchall()
             else:
                 rows = connection.execute(
                     """
-                    SELECT * FROM courses WHERE deleted_at_utc IS NULL AND weekday=?
+                    SELECT * FROM courses WHERE deleted_at_utc IS NULL AND selection_state='selected'
+                    AND weekday=?
                     ORDER BY start_section
                     """,
                     (weekday,),
                 ).fetchall()
         return [self._from_row(row) for row in rows]
+
+    def current_week(self, *, now: datetime | None = None) -> int:
+        raw = os.getenv("AMADEUS_SEMESTER_START", "").strip()
+        if not raw:
+            raise ValueError("未配置学期开始日期，无法确定本周周次")
+        zone = ZoneInfo("Asia/Shanghai")
+        today = (now or datetime.now(zone)).astimezone(zone).date()
+        start = datetime.fromisoformat(raw).date()
+        week = ((today - start).days // 7) + 1
+        if not 1 <= week <= 30:
+            raise ValueError("当前日期不在已配置的学期内")
+        return week
+
+    def week_courses(self, user_id: str, week: int) -> list[CourseRecord]:
+        if not 1 <= week <= 30:
+            raise ValueError("周次必须在 1～30")
+        return [course for course in self.list(user_id) if week in normalize_weeks(course.weeks)]
 
     def edit(self, user_id: str, course_id: int, changes: dict[str, Any]) -> bool:
         allowed = {"name", "teacher", "location", "weekday", "start_section", "end_section", "weeks"}
@@ -117,21 +138,68 @@ class CourseService:
         with self.repository.connection(user_id) as connection:
             cursor = connection.execute(
                 f"UPDATE courses SET {assignments},updated_at_utc=CURRENT_TIMESTAMP "
-                "WHERE course_id=? AND deleted_at_utc IS NULL",
+                "WHERE course_id=? AND deleted_at_utc IS NULL AND selection_state='selected'",
                 (*values.values(), int(course_id)),
             )
             return cursor.rowcount > 0
 
     def delete(self, user_id: str, course_id: int) -> bool:
+        try:
+            self.delete_many(user_id, [course_id])
+        except ValueError:
+            return False
+        return True
+
+    def delete_all(self, user_id: str) -> int:
         with self.repository.connection(user_id) as connection:
-            cursor = connection.execute(
-                """
-                UPDATE courses SET deleted_at_utc=CURRENT_TIMESTAMP
-                WHERE course_id=? AND deleted_at_utc IS NULL
-                """,
-                (int(course_id),),
+            count = connection.execute(
+                "SELECT COUNT(*) FROM courses WHERE deleted_at_utc IS NULL"
+            ).fetchone()[0]
+            connection.execute("DELETE FROM course_reminder_deliveries")
+            connection.execute("DELETE FROM courses")
+            connection.execute("DELETE FROM course_conflict_prompts")
+        return int(count)
+
+    def delete_many(self, user_id: str, course_ids: list[int]) -> tuple[int, int]:
+        ids = list(dict.fromkeys(course_ids))
+        if not ids:
+            raise ValueError("至少需要一个课程 ID")
+        with self.repository.connection(user_id) as connection:
+            placeholders = ",".join("?" for _ in ids)
+            existing = connection.execute(
+                f"SELECT course_id FROM courses WHERE course_id IN ({placeholders}) "
+                "AND deleted_at_utc IS NULL",
+                ids,
+            ).fetchall()
+            found = {row["course_id"] for row in existing}
+            if missing := set(ids) - found:
+                raise ValueError("课程 ID 不存在：" + "、".join(map(str, sorted(missing))))
+            connection.execute(
+                f"UPDATE courses SET deleted_at_utc=CURRENT_TIMESTAMP WHERE course_id IN ({placeholders})",
+                ids,
             )
-            return cursor.rowcount > 0
+            connection.execute(
+                f"DELETE FROM course_reminder_deliveries WHERE course_id IN ({placeholders})",
+                ids,
+            )
+            pending = connection.execute(
+                "SELECT * FROM courses WHERE deleted_at_utc IS NULL AND selection_state='pending'"
+            ).fetchall()
+            automatic = [
+                row["course_id"]
+                for row in pending
+                if not any(
+                    row["course_id"] != other["course_id"] and _courses_overlap(row, other)
+                    for other in pending
+                )
+            ]
+            if automatic:
+                auto_slots = ",".join("?" for _ in automatic)
+                connection.execute(
+                    f"UPDATE courses SET selection_state='selected' WHERE course_id IN ({auto_slots})",
+                    automatic,
+                )
+        return len(ids), len(automatic)
 
     def set_reminder(self, user_id: str, course_id: int | None, minutes: int | None) -> int:
         if minutes is not None and not 0 <= minutes <= 1440:
@@ -139,13 +207,15 @@ class CourseService:
         with self.repository.connection(user_id) as connection:
             if course_id is None:
                 cursor = connection.execute(
-                    "UPDATE courses SET reminder_minutes=? WHERE deleted_at_utc IS NULL", (minutes,)
+                    "UPDATE courses SET reminder_minutes=? WHERE deleted_at_utc IS NULL "
+                    "AND selection_state='selected'",
+                    (minutes,),
                 )
             else:
                 cursor = connection.execute(
                     """
                     UPDATE courses SET reminder_minutes=?
-                    WHERE course_id=? AND deleted_at_utc IS NULL
+                    WHERE course_id=? AND deleted_at_utc IS NULL AND selection_state='selected'
                     """,
                     (minutes, int(course_id)),
                 )
@@ -235,25 +305,160 @@ class CourseService:
         return self._make_preview(user_id, rows, path.name)
 
     def confirm(self, user_id: str, token: str) -> tuple[str, int]:
-        preview = self._previews.pop(token, None)
+        preview = self._previews.get(token)
         if preview is None or preview.user_id != str(user_id):
             raise ValueError("导入 token 无效或不属于当前用户")
         batch_id = secrets.token_hex(8)
-        count = 0
-        for row in preview.rows:
-            self.add(
-                user_id,
-                str(row["name"]),
-                int(row["weekday"]),
-                (int(row["start_section"]), int(row["end_section"])),
-                str(row["weeks"]),
-                str(row.get("location", "")),
-                str(row.get("teacher", "")),
-                source=preview.source,
-                batch_id=batch_id,
+        rows = preview.rows
+        pending = {
+            index
+            for index, row in enumerate(rows)
+            if any(
+                index != other and _courses_overlap(row, candidate) for other, candidate in enumerate(rows)
             )
-            count += 1
-        return batch_id, count
+        }
+        with self.repository.connection(user_id) as connection:
+            connection.execute("DELETE FROM course_reminder_deliveries")
+            connection.execute("DELETE FROM courses")
+            for index, row in enumerate(rows):
+                connection.execute(
+                    """
+                    INSERT INTO courses (
+                        name, teacher, location, weekday, start_section, end_section, weeks,
+                        source, import_batch_id, selection_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["name"],
+                        row.get("teacher", ""),
+                        row.get("location", ""),
+                        row["weekday"],
+                        row["start_section"],
+                        row["end_section"],
+                        row["weeks"],
+                        preview.source,
+                        batch_id,
+                        "pending" if index in pending else "selected",
+                    ),
+                )
+        self._previews.pop(token, None)
+        return batch_id, len(rows)
+
+    def pending_courses(self, user_id: str) -> list[CourseRecord]:
+        with self.repository.connection(user_id) as connection:
+            rows = connection.execute(
+                "SELECT * FROM courses WHERE deleted_at_utc IS NULL AND selection_state='pending' "
+                "ORDER BY weekday,start_section,course_id"
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def conflict_groups(self, user_id: str) -> list[list[CourseRecord]]:
+        pending = self.pending_courses(user_id)
+        by_id = {row.course_id: row for row in pending}
+        neighbors = {row.course_id: set() for row in pending}
+        for index, row in enumerate(pending):
+            for other in pending[index + 1 :]:
+                if _courses_overlap(row, other):
+                    neighbors[row.course_id].add(other.course_id)
+                    neighbors[other.course_id].add(row.course_id)
+        groups = []
+        while neighbors:
+            start = next(iter(neighbors))
+            component = {start}
+            frontier = [start]
+            while frontier:
+                current = frontier.pop()
+                for neighbor in neighbors[current] - component:
+                    component.add(neighbor)
+                    frontier.append(neighbor)
+            groups.append([by_id[item] for item in sorted(component)])
+            for item in component:
+                neighbors.pop(item)
+        return groups
+
+    def choose(self, user_id: str, course_id: int) -> tuple[int, int]:
+        return self.choose_many(user_id, [course_id])
+
+    def choose_many(self, user_id: str, course_ids: list[int]) -> tuple[int, int]:
+        ids = list(dict.fromkeys(course_ids))
+        if not ids:
+            raise ValueError("至少需要一个课程 ID")
+        with self.repository.connection(user_id) as connection:
+            rows = connection.execute(
+                "SELECT * FROM courses WHERE deleted_at_utc IS NULL AND selection_state='pending'"
+            ).fetchall()
+            by_id = {row["course_id"]: row for row in rows}
+            if missing := set(ids) - by_id.keys():
+                raise ValueError("课程 ID 不在待选择列表中：" + "、".join(map(str, sorted(missing))))
+            selected = [by_id[course_id] for course_id in ids]
+            for index, row in enumerate(selected):
+                for other in selected[index + 1 :]:
+                    if _courses_overlap(row, other):
+                        raise ValueError(
+                            f"选择冲突：课程 #{row['course_id']} 与 #{other['course_id']} 时间重叠；"
+                            "请只选择实际修读的课程"
+                        )
+            rejected = [
+                row["course_id"]
+                for row in rows
+                if row["course_id"] not in ids and any(_courses_overlap(choice, row) for choice in selected)
+            ]
+            if rejected:
+                placeholders = ",".join("?" for _ in rejected)
+                connection.execute(
+                    f"UPDATE courses SET deleted_at_utc=CURRENT_TIMESTAMP "
+                    f"WHERE course_id IN ({placeholders})",
+                    rejected,
+                )
+            selected_slots = ",".join("?" for _ in ids)
+            connection.execute(
+                f"UPDATE courses SET selection_state='selected' WHERE course_id IN ({selected_slots})",
+                ids,
+            )
+            remaining = [row for row in rows if row["course_id"] not in {*rejected, *ids}]
+            automatic = [
+                row["course_id"]
+                for row in remaining
+                if not any(
+                    row["course_id"] != other["course_id"] and _courses_overlap(row, other)
+                    for other in remaining
+                )
+            ]
+            if automatic:
+                placeholders = ",".join("?" for _ in automatic)
+                connection.execute(
+                    f"UPDATE courses SET selection_state='selected' WHERE course_id IN ({placeholders})",
+                    automatic,
+                )
+        return len(rejected), len(automatic)
+
+    def register_conflict_prompt(
+        self, actor_id: str, subject_id: str, message_id: str, group_id: str | None
+    ) -> None:
+        with self.repository.connection(actor_id) as connection:
+            connection.execute("DELETE FROM course_conflict_prompts")
+            connection.execute(
+                "INSERT INTO course_conflict_prompts "
+                "(message_id, subject_id, scope_type, scope_id) VALUES (?, ?, ?, ?)",
+                (str(message_id), str(subject_id), "group" if group_id else "private", group_id or actor_id),
+            )
+
+    def conflict_reply_subject(
+        self, actor_id: str, message_id: str, group_id: str | None, *, is_superuser: bool
+    ) -> str | None:
+        if not (self.repository.users_root / str(actor_id) / "user.sqlite3").is_file():
+            return None
+        with self.repository.connection(actor_id) as connection:
+            row = connection.execute(
+                "SELECT subject_id FROM course_conflict_prompts "
+                "WHERE message_id=? AND scope_type=? AND scope_id=? "
+                "AND created_at_utc > datetime('now', '-1 day')",
+                (str(message_id), "group" if group_id else "private", group_id or actor_id),
+            ).fetchone()
+        if row is None:
+            return None
+        subject_id = str(row["subject_id"])
+        return subject_id if subject_id == actor_id or is_superuser else None
 
     def preview_rows(self, user_id: str, rows: list[dict[str, Any]], source: str) -> ImportPreview:
         return self._make_preview(user_id, rows, source)
@@ -267,13 +472,38 @@ class CourseService:
         if missing:
             raise ValueError("无法确定列映射：" + "、".join(sorted(missing)))
         normalized = []
+        by_identity: dict[tuple, dict] = {}
         for raw in rows:
             item = {target: raw.get(source_name, "") for target, source_name in mapping.items()}
             item["weekday"] = parse_weekday(str(item["weekday"]))
             item["start_section"] = int(item["start_section"])
             item["end_section"] = int(item["end_section"])
             item["weeks"] = str(item["weeks"])
-            normalized.append(item)
+            if not 1 <= item["start_section"] <= item["end_section"] <= 20:
+                raise ValueError("节次必须在 1～20 且结束节不早于开始节")
+            normalize_weeks(item["weeks"])
+            item["name"] = str(item["name"]).strip()
+            if not item["name"]:
+                raise ValueError("课程名不能为空")
+            item["teacher"] = str(item.get("teacher") or "").strip()
+            item["location"] = str(item.get("location") or "").strip()
+            key = tuple(
+                item[field]
+                for field in (
+                    "name",
+                    "teacher",
+                    "location",
+                    "weekday",
+                    "start_section",
+                    "end_section",
+                )
+            )
+            if key not in by_identity:
+                by_identity[key] = item
+                normalized.append(item)
+            else:
+                weeks = normalize_weeks(by_identity[key]["weeks"]) | normalize_weeks(item["weeks"])
+                by_identity[key]["weeks"] = _format_weeks(weeks)
         token = secrets.token_urlsafe(8)
         preview = ImportPreview(token, str(user_id), normalized, source)
         self._previews[token] = preview
@@ -300,7 +530,20 @@ class CourseService:
             str(row["location"]),
             str(row["teacher"]),
             int(row["reminder_minutes"]) if row["reminder_minutes"] is not None else None,
+            str(row["selection_state"]),
         )
+
+
+def _courses_overlap(first: dict | CourseRecord, second: dict | CourseRecord) -> bool:
+    def field(row, key: str):
+        return row[key] if isinstance(row, (dict, sqlite3.Row)) else getattr(row, key)
+
+    return (
+        field(first, "weekday") == field(second, "weekday")
+        and field(first, "start_section") <= field(second, "end_section")
+        and field(second, "start_section") <= field(first, "end_section")
+        and bool(normalize_weeks(field(first, "weeks")) & normalize_weeks(field(second, "weeks")))
+    )
 
 
 def parse_weekday(value: str) -> int:
@@ -333,6 +576,19 @@ def normalize_weeks(value: str) -> set[int]:
             raise ValueError("周次必须在 1～30")
         result.update(range(start, end + 1))
     return result
+
+
+def _format_weeks(weeks: set[int]) -> str:
+    ranges: list[str] = []
+    start = end = min(weeks)
+    for week in sorted(weeks - {start}):
+        if week == end + 1:
+            end = week
+        else:
+            ranges.append(f"{start}-{end}" if start != end else str(start))
+            start = end = week
+    ranges.append(f"{start}-{end}" if start != end else str(start))
+    return ",".join(ranges)
 
 
 def parse_bupt_timetable_rows(values: list | tuple) -> list[dict[str, Any]]:
@@ -390,14 +646,15 @@ def _section_times() -> dict[int, time]:
         3: "09:50",
         4: "10:40",
         5: "11:30",
-        6: "13:30",
-        7: "14:20",
-        8: "15:20",
-        9: "16:10",
-        10: "17:00",
-        11: "18:30",
-        12: "19:20",
-        13: "20:10",
+        6: "13:00",
+        7: "13:50",
+        8: "14:45",
+        9: "15:40",
+        10: "16:35",
+        11: "17:25",
+        12: "18:30",
+        13: "19:20",
+        14: "20:10",
     }
     raw = os.getenv("AMADEUS_SECTION_TIMES", "").strip()
     if raw:
@@ -406,3 +663,13 @@ def _section_times() -> dict[int, time]:
         except (ValueError, TypeError, json.JSONDecodeError):
             pass
     return {key: time.fromisoformat(value) for key, value in defaults.items()}
+
+
+def section_periods() -> dict[int, tuple[str, str]]:
+    return {
+        number: (
+            start.strftime("%H:%M"),
+            (datetime.combine(datetime(2000, 1, 1), start) + timedelta(minutes=45)).strftime("%H:%M"),
+        )
+        for number, start in _section_times().items()
+    }

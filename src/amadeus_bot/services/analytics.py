@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from amadeus_bot.services.event_utils import cq_message_text
+
 
 @dataclass(frozen=True, slots=True)
 class AnalyticsWindow:
@@ -22,8 +24,8 @@ class AnalyticsWindow:
         return tuple(
             row
             for row in self.records
-            if str(row.get("plain_text", "")).strip()
-            and not str(row.get("plain_text", "")).lstrip().startswith("/")
+            if not str(row.get("plain_text", "")).lstrip().startswith("/")
+            and (str(row.get("plain_text", "")).strip() or row.get("segments"))
         )
 
 
@@ -93,13 +95,11 @@ class AnalyticsService:
         size = 0
         for row in window.effective_records:
             text = str(row.get("plain_text", "")).strip()
-            if not text:
-                text = (
-                    "[非文本消息："
-                    + ",".join(str(segment.get("type", "unknown")) for segment in row.get("segments", []))
-                    + "]"
-                )
-            line = f"{row.get('user_id')}: {text[:500]}"
+            cq_text = cq_message_text(row.get("segments") or [])
+            line = (
+                f"[消息 #{row.get('message_id')}][发送者 QQ {row.get('user_id')}] "
+                f"纯文本：{text[:500]}\nCQ消息：{cq_text[:1200]}"
+            )
             if size + len(line) > max_chars:
                 break
             lines.append(line)

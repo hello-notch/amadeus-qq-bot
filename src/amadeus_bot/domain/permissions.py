@@ -7,8 +7,6 @@ class PermissionLevel(StrEnum):
     EVERYONE = "EVERYONE"
     MEMBER = "MEMBER"
     SUPERUSER = "SUPERUSER"
-    OWNER_OR_MEMBER = "OWNER_OR_MEMBER"
-    SELF_OR_SUPERUSER = "SELF_OR_SUPERUSER"
 
 
 class Capability(StrEnum):

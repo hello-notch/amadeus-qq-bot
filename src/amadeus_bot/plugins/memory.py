@@ -20,14 +20,15 @@ from amadeus_bot.services.analytics import AnalyticsService
 command_registry.register(
     CommandSpec(
         name="memory",
-        description="提交本人记忆处理申请；SUPERUSER 人工处理",
+        description="SUPERUSER 管理记忆及处理申请",
         usage=(
-            "/memory request <view/edit/delete/optout> [说明]；"
-            "/memory requests [pending/all]；/memory show <QQ> [memory_id]；"
-            "/memory edit <QQ> <memory_id> <内容>；/memory delete <QQ> <memory_id>；"
-            "/memory analysis <QQ> on/off"
+            "/memory request <view/edit/delete/optout> [说明]：提交人工处理申请；"
+            "/memory requests [pending/all]：查看申请；/memory show <QQ> [memory_id]：查看记忆；"
+            "/memory edit <QQ> <memory_id> <内容>：修改记忆；"
+            "/memory delete <QQ> <memory_id>：删除记忆；"
+            "/memory analysis <QQ> on/off：设置分析开关"
         ),
-        permission=PermissionLevel.EVERYONE,
+        permission=PermissionLevel.SUPERUSER,
         feature="memory",
         ai_callable=False,
         examples=(
@@ -36,7 +37,7 @@ command_registry.register(
             "/memory request optout",
         ),
         notes=(
-            "普通用户只能为本人提交处理申请；查看、编辑和删除由开发者人工处理",
+            "命令仅 SUPERUSER 可用；自然语言记忆处理申请仍可由用户提交",
             "optout 会立即关闭本人的新记忆候选提取，并创建处理申请",
             "requests/show/edit/delete/analysis 仅 SUPERUSER 可用，AI 无权处理",
             "长期记忆存放在 data/users/<QQ号>/user.sqlite3，跨群共享但不披露来源群原话",
@@ -69,6 +70,8 @@ async def handle_natural_request(event) -> None:
 async def handle_memory(event, arguments: Message = CommandArg()) -> None:
     tokens = arguments.extract_plain_text().split()
     is_superuser = get_container().permissions.role_for(event.get_user_id()) == PermissionLevel.SUPERUSER
+    if not is_superuser:
+        await memory_command.finish("该命令仅 SUPERUSER 可用。")
     if not tokens:
         await memory_command.finish("用法：/memory request <view/edit/delete/optout> [说明]")
     if tokens[0] == "request":
@@ -76,8 +79,6 @@ async def handle_memory(event, arguments: Message = CommandArg()) -> None:
             await memory_command.finish("申请类型必须是 view、edit、delete 或 optout。")
         request_id = _create_request(event.get_user_id(), tokens[1], " ".join(tokens[2:]))
         await memory_command.finish(f"已创建记忆处理申请 #{request_id}；开发者会人工处理。")
-    if not is_superuser:
-        await memory_command.finish("其余 memory 子命令仅 SUPERUSER 可用。")
     try:
         text = _execute_admin(tokens, event.get_user_id())
     except ValueError as exc:
