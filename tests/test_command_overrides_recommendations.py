@@ -105,7 +105,8 @@ async def test_override_replies_put_action_before_command(tmp_path, monkeypatch)
 
     import pytest
 
-    with pytest.raises(Finished, match=r"已关闭/chat（当前群）"):
-        await command_overrides._set_override(event, Message("chat"), True, Matcher())
-    with pytest.raises(Finished, match=r"已开启/chat（当前群）"):
-        await command_overrides._set_override(event, Message("chat"), False, Matcher())
+    for name in ("chat", "food"):
+        with pytest.raises(Finished, match=rf"已关闭/{name}（当前群）"):
+            await command_overrides._set_override(event, Message(name), True, Matcher())
+        with pytest.raises(Finished, match=rf"已开启/{name}（当前群）"):
+            await command_overrides._set_override(event, Message(name), False, Matcher())
