@@ -90,21 +90,38 @@ class AnalyticsService:
         }
 
     @staticmethod
-    def ai_transcript(window: AnalyticsWindow, *, max_chars: int = 18_000) -> str:
+    def ai_transcript(window: AnalyticsWindow, *, max_chars: int = 18_000, user_id: str | None = None) -> str:
+        rows = [
+            row for row in window.effective_records if user_id is None or str(row.get("user_id")) == user_id
+        ]
         lines = []
-        size = 0
-        for row in window.effective_records:
+        for row in rows:
             text = str(row.get("plain_text", "")).strip()
             cq_text = cq_message_text(row.get("segments") or [])
             line = (
                 f"[消息 #{row.get('message_id')}][发送者 QQ {row.get('user_id')}] "
                 f"纯文本：{text[:500]}\nCQ消息：{cq_text[:1200]}"
             )
-            if size + len(line) > max_chars:
-                break
             lines.append(line)
-            size += len(line)
-        return "\n".join(lines)
+        if not lines:
+            return ""
+        # Sample across the full window, retaining temporal order and the latest message.
+        count = min(len(lines), max(2, max_chars // 300))
+        indices = (
+            list(range(len(lines)))
+            if count == len(lines)
+            else list(dict.fromkeys(round(i * (len(lines) - 1) / (count - 1)) for i in range(count)))
+        )
+        budget = max_chars
+        selected: list[str] = []
+        for index in reversed(indices):
+            line = lines[index][: max(0, budget)]
+            if line:
+                selected.append(line)
+                budget -= len(line) + 1
+            if budget <= 0:
+                break
+        return "\n".join(reversed(selected))
 
 
 def format_deterministic(window: AnalyticsWindow, stats: dict[str, Any]) -> str:

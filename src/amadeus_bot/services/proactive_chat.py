@@ -42,10 +42,6 @@ def proactive_score(text: str) -> int:
     score = 4 if any(name in lowered for name in names) or re.search(r"\bbot\b", lowered) else 0
     if any(topic in lowered for topic in topics):
         score += 2
-    if text.endswith(("?", "？")):
-        score += 2
-    if any(word in text for word in ("有人知道", "怎么", "为什么", "求推荐", "怎么办")):
-        score += 1
     return score
 
 
@@ -63,7 +59,7 @@ def parse_gate_decision(content: str) -> bool:
             decision.get("respond") is True
             and isinstance(confidence, (int, float))
             and not isinstance(confidence, bool)
-            and 0.7 <= confidence <= 1
+            and 0.55 <= confidence <= 1
         ):
             return True
         if "respond" in decision:
@@ -73,7 +69,7 @@ def parse_gate_decision(content: str) -> bool:
 
 @dataclass
 class ProactiveContext:
-    messages: deque[tuple[float, str, str]] = field(default_factory=lambda: deque(maxlen=12))
+    messages: deque[tuple[float, str, str]] = field(default_factory=lambda: deque(maxlen=24))
     last_gate: float | None = None
 
     def observe(self, now: float, user_id: str, text: str) -> None:
@@ -83,9 +79,9 @@ class ProactiveContext:
 
     def conversation_candidate(self, now: float) -> bool:
         return (
-            len(self.messages) >= 4
+            len(self.messages) >= 3
             and len({user for _, user, _ in self.messages}) >= 2
-            and (self.last_gate is None or now - self.last_gate >= 45)
+            and (self.last_gate is None or now - self.last_gate >= 30)
         )
 
     def prompt_context(self) -> str:

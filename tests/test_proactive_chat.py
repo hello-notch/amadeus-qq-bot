@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from datetime import datetime, timedelta
 
 import nonebot
 import pytest
 
 from amadeus_bot.services.event_utils import onebot_message
+from amadeus_bot.services.analytics import AnalyticsService, AnalyticsWindow
 from amadeus_bot.services.proactive_chat import (
     ProactiveContext,
     chat_bubbles,
@@ -19,7 +21,7 @@ def test_keywords(text):
 
 
 def test_question_and_no_substring_bot():
-    assert proactive_score("有人知道怎么办？") >= 2
+    assert proactive_score("有人知道怎么办？") == 0
     assert proactive_score("robotics") == 0
 
 
@@ -30,16 +32,21 @@ def test_context_sampling_expiry_and_isolation():
     assert context.conversation_candidate(5)
     context.last_gate = 5
     assert not context.conversation_candidate(10)
-    assert context.conversation_candidate(50)
+    assert context.conversation_candidate(36)
     context.observe(130, "1", "新话题")
     assert not context.conversation_candidate(130)
     assert not ProactiveContext().conversation_candidate(5)
+    assert len(context.messages) < 24
+    for i in range(30):
+        context.observe(200 + i, str(i % 2), f"消息{i}")
+    assert len(context.messages) == 24
+    assert "消息29" in context.prompt_context()
 
 
 @pytest.mark.parametrize(
     "content",
     [
-        '{"respond":true,"confidence":0.8}',
+        '{"respond":true,"confidence":0.55}',
         '```json\n{"respond":true,"confidence":1}\n```',
     ],
 )
@@ -71,6 +78,26 @@ def test_bubbles_preserve_long_content_and_code():
     assert chat_bubbles("第一句\n\n第二句", 500) == ["第一句", "第二句"]
     for text in ["x" * 500, "```python\nprint(1)\n```", "a\nb", "一。二。三。四。"]:
         assert chat_bubbles(text, 500) == [text]
+
+
+def test_stats_transcript_filters_user_and_samples_whole_window():
+    now = datetime.now().astimezone()
+    rows = tuple(
+        {
+            "timestamp": int(now.timestamp()),
+            "message_id": i,
+            "user_id": str(i % 2),
+            "plain_text": f"消息{i}",
+            "segments": [],
+        }
+        for i in range(40)
+    )
+    window = AnalyticsWindow("1", 1, now - timedelta(hours=1), now, rows)
+    transcript = AnalyticsService.ai_transcript(window, max_chars=1200, user_id="1")
+    assert "消息1" in transcript
+    assert "消息39" in transcript
+    assert "消息0" not in transcript
+    assert len(transcript) <= 1200
 
 
 @pytest.mark.asyncio

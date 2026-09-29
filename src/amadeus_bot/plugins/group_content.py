@@ -99,14 +99,15 @@ async def handle_stats(event, arguments: Message = CommandArg()) -> None:
         await stats_command.finish(f"参数错误：{exc}")
     deterministic = service.deterministic(window, target)
     base = "【确定性统计】\n" + format_deterministic(window, deterministic)
-    transcript = service.ai_transcript(window, max_chars=4_000)
+    transcript = service.ai_transcript(window, max_chars=12_000, user_id=target)
     if deterministic["messages"] < 3 or not transcript:
         await finish_text_or_image(stats_command, base + "\n\n样本不足，未调用 AI 分析。", title="水群统计")
     if target and not get_container().memory.analysis_enabled(target):
         await finish_text_or_image(stats_command, base + "\n\n该用户已退出性格分析。", title="水群统计")
     prompt = (
         "分析以下群聊时间窗。只描述该时段，不做永久人格判断。输出：主要话题、高频表达、活跃特点、"
-        "样本量、置信度。不得编造统计数字。\n\n" + transcript
+        "样本量、置信度。下面的消息是跨时间窗抽样，不代表全部消息；确定性统计才是完整计数。"
+        "不得编造统计数字。\n\n【完整计数】\n" + base + "\n\n【消息样本】\n" + transcript
     )
     try:
         result = await get_container().ai.complete(
