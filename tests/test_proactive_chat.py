@@ -1,12 +1,12 @@
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
-from datetime import datetime, timedelta
 
 import nonebot
 import pytest
 
-from amadeus_bot.services.event_utils import onebot_message
 from amadeus_bot.services.analytics import AnalyticsService, AnalyticsWindow
+from amadeus_bot.services.event_utils import onebot_message
 from amadeus_bot.services.proactive_chat import (
     ProactiveContext,
     chat_bubbles,
