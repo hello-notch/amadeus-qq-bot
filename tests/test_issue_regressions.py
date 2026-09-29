@@ -138,3 +138,12 @@ async def test_issue_report_captures_bounded_context(tmp_path: Path) -> None:
     assert "异常" in (directory / "messages.jsonl").read_text(encoding="utf-8")
     assert "测试错误" in (directory / "activity.jsonl").read_text(encoding="utf-8")
     assert "ERROR" in (directory / "runtime.log").read_text(encoding="utf-8")
+
+    archived = IssueReportService(tmp_path, logs).resolve(directory.name)
+    assert archived == tmp_path / "issues" / "resolved" / directory.name
+    assert (archived / "metadata.json").is_file()
+    assert not directory.exists()
+    with pytest.raises(FileNotFoundError):
+        IssueReportService(tmp_path, logs).resolve(directory.name)
+    with pytest.raises(ValueError):
+        IssueReportService(tmp_path, logs).resolve("../logs")

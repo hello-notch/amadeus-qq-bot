@@ -19,13 +19,14 @@ command_registry.register(
     CommandSpec(
         name="issue",
         description="把疑似异常消息及附近日志保存为本地问题快照",
-        usage="回复疑似异常消息后 /issue [说明]；或直接 /issue [说明] 记录命令附近内容",
+        usage="回复疑似异常消息后 /issue [说明]；/issue resolve <快照ID> 归档已解决问题",
         permission=PermissionLevel.SUPERUSER,
         ai_callable=False,
         examples=("回复异常回复后 /issue course 导入报错", "/issue 刚才机器人没有响应"),
         notes=(
             "优先回复具体异常消息；不回复时以本命令为时间锚点",
             "快照写入 issues/<时间-消息ID>/，包含附近消息、活动日志和运行日志",
+            "已解决的快照移至 issues/resolved/，保留原始材料",
             "仅 SUPERUSER 可用，AI 无权调用；不会下载或复制消息中的附件内容",
         ),
     )
@@ -37,6 +38,18 @@ issue_command = on_command("issue", permission=SUPERUSER, priority=5, block=True
 @issue_command.handle()
 async def handle_issue(bot: Bot, event, arguments: Message = CommandArg()) -> None:
     container = get_container()
+    note = arguments.extract_plain_text().strip()
+    if note == "resolve" or note.startswith("resolve "):
+        parts = note.split()
+        if len(parts) != 2:
+            await issue_command.finish("用法：/issue resolve <快照ID>")
+        simulation_root = os.getenv("AMADEUS_SIMULATOR_ROOT")
+        root = Path(simulation_root) if simulation_root else container.paths.project_root
+        try:
+            directory = IssueReportService(root, container.paths.logs).resolve(parts[1])
+        except (ValueError, FileNotFoundError, FileExistsError):
+            await issue_command.finish("快照 ID 无效、不存在或已归档。")
+        await issue_command.finish(f"已归档：issues/resolved/{directory.name}")
     group_id = event_group_id(event)
     user_id = event.get_user_id()
     current_time = int(getattr(event, "time", 0) or 0)
@@ -64,7 +77,7 @@ async def handle_issue(bot: Bot, event, arguments: Message = CommandArg()) -> No
         user_id=user_id,
         command_message=command_message,
         replied_message=replied_message,
-        note=arguments.extract_plain_text().strip(),
+        note=note,
     )
     await issue_command.finish(f"问题快照已保存：issues/{directory.name}")
 

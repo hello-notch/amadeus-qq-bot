@@ -15,6 +15,21 @@ class IssueReportService:
         self.issue_root = project_root / "issues"
         self.log_root = log_root
 
+    def resolve(self, issue_id: str) -> Path:
+        """Move one completed snapshot out of the active issue directory."""
+        if not re.fullmatch(r"\d{8}-\d{6}-[0-9A-Za-z_-]+", issue_id):
+            raise ValueError("无效的问题快照 ID")
+        source = self.issue_root / issue_id
+        archive = self.issue_root / "resolved"
+        target = archive / issue_id
+        if not source.is_dir() or not (source / "metadata.json").is_file():
+            raise FileNotFoundError(issue_id)
+        if target.exists():
+            raise FileExistsError(issue_id)
+        archive.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+        return target
+
     async def capture(
         self,
         *,
