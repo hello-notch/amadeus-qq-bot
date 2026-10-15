@@ -7,10 +7,12 @@ from threading import RLock
 from typing import Any
 
 from amadeus_bot.adapters.ai_provider import (
+    AIProviderRateLimited,
     ApiCredential,
     OpenAICompatibleProvider,
     ProviderConfig,
 )
+from amadeus_bot.adapters.gemini_provider import GeminiProvider
 from amadeus_bot.domain.ai import AIResponse, AITask, ModelTarget, TaskRoute
 from amadeus_bot.repositories.core import CoreRepository
 
@@ -39,6 +41,8 @@ class AIRouteCatalog:
                 responses_stream=bool(values.get("responses_stream", False)),
                 thinking_enabled=bool(values.get("thinking_enabled", True)),
                 models=tuple(str(item) for item in values.get("models", [])),
+                thinking_level=str(values.get("thinking_level", "")),
+                image_models=tuple(str(item) for item in values.get("image_models", [])),
             )
             for name, values in raw.get("providers", {}).items()
         }
@@ -86,7 +90,7 @@ class AIRouteCatalog:
 
     def _validate(self) -> None:
         for provider in self.providers.values():
-            if provider.api_mode not in {"chat_completions", "responses"}:
+            if provider.api_mode not in {"chat_completions", "responses", "gemini", "images"}:
                 raise ValueError(f"未知 AI API 模式：{provider.name}/{provider.api_mode}")
         configured = set(self.model_targets())
         if self.default_model not in configured:
@@ -111,11 +115,18 @@ class AIService:
         self.catalog = catalog
         self.repository = repository
         self._model_lock = RLock()
-        self.providers: dict[str, OpenAICompatibleProvider] = {}
+        self.providers: dict[str, OpenAICompatibleProvider | GeminiProvider] = {}
         for name, provider_config in catalog.providers.items():
             credential = credentials.get(provider_config.credential_host)
             if credential is not None:
-                self.providers[name] = OpenAICompatibleProvider(provider_config, credential)
+                provider_class = (
+                    GeminiProvider if provider_config.api_mode == "gemini" else OpenAICompatibleProvider
+                )
+                self.providers[name] = (
+                    OpenAICompatibleProvider(provider_config, credential, timeout_seconds=180.0)
+                    if provider_config.api_mode == "images"
+                    else provider_class(provider_config, credential)
+                )
         self._active_model = self._load_active_model()
 
     def available(self) -> bool:
@@ -123,17 +134,29 @@ class AIService:
 
     def route_description(self) -> dict[str, str]:
         current = self.current_model().qualified_name
-        return {task.value: current for task in self.catalog.routes}
+        return {
+            task.value: self.catalog.routes[task].primary.qualified_name
+            if task in {AITask.VISION, AITask.SUMMARY, AITask.STATS_ANALYSIS, AITask.IMAGE_GENERATION}
+            else current
+            for task in self.catalog.routes
+        }
 
     def current_model(self) -> ModelTarget:
         with self._model_lock:
             return self._active_model
 
     def available_models(self) -> tuple[ModelTarget, ...]:
-        return tuple(target for target in self.catalog.model_targets() if target.provider in self.providers)
+        return tuple(
+            target
+            for target in self.catalog.model_targets()
+            if target.provider in self.providers
+            and target.model not in self.catalog.providers[target.provider].image_models
+        )
 
     def switch_model(self, model_name: str, actor: str) -> ModelTarget:
         target = self.catalog.resolve_model(model_name)
+        if target.model in self.catalog.providers[target.provider].image_models:
+            raise ValueError("图像生成模型不能设为聊天主模型；请使用 /draw")
         if target.provider not in self.providers:
             raise ValueError(f"模型供应商未配置凭据：{target.provider}")
         self.repository.set_runtime_setting(
@@ -149,7 +172,9 @@ class AIService:
         stored = self.repository.get_runtime_setting(self.ACTIVE_MODEL_SETTING)
         if stored:
             try:
-                return self.catalog.resolve_model(stored)
+                target = self.catalog.resolve_model(stored)
+                if target.model not in self.catalog.providers[target.provider].image_models:
+                    return target
             except ValueError:
                 pass
         return self.catalog.default_model
@@ -168,9 +193,10 @@ class AIService:
             raise AIQuotaExceeded(f"AI 任务 {task.value} 已达到当日调用上限 {quota[0]}")
         route = self.catalog.routes[task]
         errors: list[str] = []
+        rate_limited = False
         targets = dict.fromkeys(
             (route.primary, *route.fallbacks)
-            if task in {AITask.VISION, AITask.SUMMARY, AITask.STATS_ANALYSIS}
+            if task in {AITask.VISION, AITask.SUMMARY, AITask.STATS_ANALYSIS, AITask.IMAGE_GENERATION}
             else (self.current_model(), route.primary, *route.fallbacks)
         )
         for target in targets:
@@ -187,9 +213,10 @@ class AIService:
                     max_tokens=route.max_tokens,
                     tools=tools,
                 )
-                if not result.content.strip() and not result.tool_calls:
+                if not result.content.strip() and not result.tool_calls and not result.images:
                     raise ValueError("AI response has no text or tool calls")
             except Exception as exc:
+                rate_limited = rate_limited or isinstance(exc, AIProviderRateLimited)
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 error_type = type(exc).__name__
                 self.repository.record_ai_usage(
@@ -218,6 +245,8 @@ class AIService:
                 user_id=user_id,
             )
             return result
+        if rate_limited:
+            raise AIProviderRateLimited("供应商当前配额已耗尽或限流")
         raise RuntimeError("所有 AI 路由均不可用：" + "; ".join(errors))
 
     async def close(self) -> None:

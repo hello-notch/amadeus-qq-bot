@@ -319,6 +319,12 @@ class CoreRepository:
             (scope_key, role, content, user_id),
         )
 
+    def clear_conversation(self, scope_key: str | None = None) -> None:
+        if scope_key is None:
+            self.database.execute("DELETE FROM conversation_messages")
+        else:
+            self.database.execute("DELETE FROM conversation_messages WHERE scope_key=?", (scope_key,))
+
     def recent_conversation(self, scope_key: str, limit: int = 12) -> list[dict[str, str]]:
         rows = self.database.fetch_all(
             """

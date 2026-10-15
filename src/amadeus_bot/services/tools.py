@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
+
 from amadeus_bot.domain.commands import command_registry
 from amadeus_bot.repositories.core import CoreRepository
 from amadeus_bot.repositories.group_data import GroupDataRepository
@@ -18,6 +20,7 @@ from amadeus_bot.services.courses import CourseService, parse_sections, parse_we
 from amadeus_bot.services.ddl import DDLService, format_ddl
 from amadeus_bot.services.event_utils import cq_message_text
 from amadeus_bot.services.feature_flags import FeatureFlagService
+from amadeus_bot.services.image_generation import ImageGenerationService
 from amadeus_bot.services.interactions import (
     MAX_POKES_PER_MINUTE,
     InteractionPacer,
@@ -70,6 +73,7 @@ class AIToolService:
         log_root: Path | None = None,
         activity_log: ActivityLogService | None = None,
         interactions: InteractionPacer | None = None,
+        image_generation: ImageGenerationService | None = None,
     ) -> None:
         self.ddl = ddl
         self.repository = repository
@@ -81,9 +85,16 @@ class AIToolService:
         self.log_root = log_root or root / "logs"
         self.activity_log = activity_log
         self.interactions = interactions or interaction_pacer
+        self.image_generation = image_generation
 
     def schemas(self) -> list[dict[str, Any]]:
         return [
+            _function(
+                "image_generate",
+                "仅在用户明确要求画图或生成图片时调用 GPT Image 2.5，成功后直接发送图片；不要重复调用",
+                {"prompt": {"type": "string", "maxLength": 2000}},
+                ["prompt"],
+            ),
             _function(
                 "help_lookup",
                 "查询机器人命令帮助",
@@ -324,6 +335,22 @@ class AIToolService:
         if context.requested_by != context.subject_user_id:
             return _result(False, error="AI 不得指定无关用户为数据主体")
         try:
+            if name == "image_generate":
+                if not self._feature_enabled("image_generation", context):
+                    return _result(False, error="当前群已关闭图像生成")
+                if context.group_id and self.repository.command_disabled(context.group_id, "draw"):
+                    return _result(False, error="[draw]被关闭了~")
+                if self.image_generation is None or context.bot is None:
+                    return _result(False, error="图像生成服务或消息连接不可用")
+                path = await self.image_generation.generate(
+                    str(arguments["prompt"]), context.requested_by, context.group_id
+                )
+                message = Message(MessageSegment.image(path.resolve().as_uri()))
+                if context.group_id:
+                    await context.bot.send_group_msg(group_id=int(context.group_id), message=message)
+                else:
+                    await context.bot.send_private_msg(user_id=int(context.requested_by), message=message)
+                return _result(True, image_sent=True, model="GPT Image 2.5")
             if name == "help_lookup":
                 spec = command_registry.get(str(arguments.get("command") or ""))
                 if spec:

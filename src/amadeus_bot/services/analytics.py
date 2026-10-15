@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from amadeus_bot.domain.commands import command_registry
 from amadeus_bot.services.event_utils import cq_message_text
 
 
@@ -25,6 +26,7 @@ class AnalyticsWindow:
             row
             for row in self.records
             if not str(row.get("plain_text", "")).lstrip().startswith("/")
+            and command_registry.get(str(row.get("plain_text", "")).strip().split(" ", 1)[0]) is None
             and (str(row.get("plain_text", "")).strip() or row.get("segments"))
         )
 

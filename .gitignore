@@ -19,6 +19,7 @@ password.txt
 playwright-report/
 test-results/
 .test-tmp/
+test-tmp/
 issues/
 napcat-runtime/
 *.log

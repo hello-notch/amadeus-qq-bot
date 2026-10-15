@@ -14,6 +14,7 @@ class AITask(StrEnum):
     MEMORY_EXTRACTION = "memory_extraction"
     VISION = "vision"
     COMPLEX_REASONING = "complex_reasoning"
+    IMAGE_GENERATION = "image_generation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,3 +61,4 @@ class AIResponse:
     raw_usage: dict[str, Any] = field(default_factory=dict)
     tool_calls: tuple[ToolCall, ...] = ()
     output_items: tuple[dict[str, Any], ...] = ()
+    images: tuple[bytes, ...] = ()

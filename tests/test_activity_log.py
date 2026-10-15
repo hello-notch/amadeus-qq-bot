@@ -37,6 +37,8 @@ async def test_activity_log_writes_human_and_structured_files(tmp_path: Path) ->
     assert row["kind"] == "inbound"
     assert row["group_id"] == "200"
     assert "你好" in text_files[0].read_text(encoding="utf-8")
+    assert "message=#300" in text_files[0].read_text(encoding="utf-8")
+    assert "message=#300" in service.format_rows(service.recent())
     assert service.recent(group_id="200")[0]["message_id"] == "300"
     assert service.recent(user_id="other") == []
 

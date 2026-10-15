@@ -31,7 +31,7 @@ command_registry.register(
 help_command = on_command("help", aliases={"帮助"}, priority=10, block=True)
 
 HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("基础与 AI", ("help", "chat", "history", "calc", "health", "md")),
+    ("基础与 AI", ("help", "chat", "history", "draw", "calc", "health", "md")),
     ("个人事务", ("ddl", "course", "memory", "privacy")),
     ("推荐", ("nowdo", "food", "music")),
     ("群聊内容", ("stats", "summary", "quote")),

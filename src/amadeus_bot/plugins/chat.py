@@ -12,8 +12,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from nonebot import on_command, on_message
-from nonebot.adapters.onebot.v11 import Bot, Message
+from nonebot import get_driver, on_command, on_message
+from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.log import logger
 from nonebot.params import CommandArg
 from nonebot.rule import to_me
@@ -25,6 +25,7 @@ from amadeus_bot.domain.permissions import PermissionLevel
 from amadeus_bot.plugins.common import event_group_id, finish_text_or_image, reply_message_id
 from amadeus_bot.services.analytics import AnalyticsService
 from amadeus_bot.services.event_utils import ai_event_text, onebot_message
+from amadeus_bot.services.group_history import GroupHistoryService
 from amadeus_bot.services.proactive_chat import (
     ProactiveContext,
     chat_bubbles,
@@ -33,6 +34,18 @@ from amadeus_bot.services.proactive_chat import (
 )
 from amadeus_bot.services.tools import ToolExecutionContext
 
+command_registry.register(
+    CommandSpec(
+        name="draw",
+        description="使用 GPT Image 2.5 生成图片",
+        usage="/draw <画面描述>",
+        permission=PermissionLevel.EVERYONE,
+        feature="image_generation",
+        ai_callable=True,
+        examples=("/draw 一只坐在窗台上的猫，水彩风格",),
+        notes=("会产生真实模型调用费用；每次生成一张图片；全局同时只生成一张",),
+    )
+)
 command_registry.register(
     CommandSpec(
         name="chat",
@@ -47,22 +60,52 @@ command_registry.register(
     CommandSpec(
         name="history",
         description="查看当前会话最近的 AI 消息上下文",
-        usage="/history [1-30]",
+        usage="/history [1-30]；/history clear",
         permission=PermissionLevel.EVERYONE,
         feature="chat",
         ai_callable=False,
         examples=("/history", "/history 20"),
-        notes=("群聊只展示当前群的 AI 对话上下文；私聊只展示本人的私聊上下文",),
+        notes=(
+            "群聊只展示当前群的 AI 对话上下文；私聊只展示本人的私聊上下文",
+            "clear 只清除聊天上下文，保留系统角色、长期记忆和日志；群聊清除仅 SUPERUSER 可用",
+            "每次启动清空旧 AI 对话；连接后补拉各群最近 24 条到日志，不恢复旧 AI 会话",
+        ),
     )
 )
 
 chat_command = on_command("chat", priority=10, block=True)
 history_command = on_command("history", priority=10, block=True)
+draw_command = on_command("draw", priority=10, block=True)
 mention_matcher = on_message(rule=to_me(), priority=20, block=True)
 proactive_matcher = on_message(priority=80, block=False)
 _proactive_times: defaultdict[str, deque[float]] = defaultdict(deque)
 _proactive_contexts: defaultdict[str, ProactiveContext] = defaultdict(ProactiveContext)
 _proactive_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_chat_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_history_service: GroupHistoryService | None = None
+
+
+@get_driver().on_startup
+async def reset_chat_context() -> None:
+    global _history_service
+    container = get_container()
+    container.repository.clear_conversation()
+    _proactive_contexts.clear()
+    _proactive_times.clear()
+    _history_service = GroupHistoryService(container)
+    await container.activity_log.record("context_reset", "启动已清空聊天上下文；系统角色和长期记忆保留")
+
+
+@get_driver().on_bot_connect
+async def refresh_group_history(bot: Bot) -> None:
+    if _history_service is None:
+        return
+    try:
+        await _history_service.refresh(bot)
+    except Exception as exc:
+        await get_container().activity_log.record(
+            "history_sync", f"获取群列表失败：{type(exc).__name__}", status="failed"
+        )
 
 
 @chat_command.handle()
@@ -73,11 +116,53 @@ async def handle_chat(bot: Bot, event, arguments: Message = CommandArg()) -> Non
     await _respond(chat_command, bot, event, text or "请看看这份附件。")
 
 
+@draw_command.handle()
+async def handle_draw(event, arguments: Message = CommandArg()) -> None:
+    container = get_container()
+    group_id = event_group_id(event)
+    if group_id and not container.features.status("image_generation", group_id).enabled:
+        await draw_command.finish("当前群已关闭图像生成。")
+    try:
+        path = await container.image_generation.generate(
+            arguments.extract_plain_text(), event.get_user_id(), group_id
+        )
+    except Exception as exc:
+        await container.activity_log.record(
+            "image_generation",
+            f"图像生成失败：{type(exc).__name__}",
+            status="failed",
+            user_id=event.get_user_id(),
+            group_id=group_id,
+        )
+        await draw_command.finish(
+            f"图像生成失败：{exc}" if isinstance(exc, ValueError) else "图像生成服务暂不可用，请稍后重试。"
+        )
+    await draw_command.finish(MessageSegment.image(path.resolve().as_uri()))
+
+
 @history_command.handle()
 async def handle_history(event, arguments: Message = CommandArg()) -> None:
     text = arguments.extract_plain_text().strip()
+    user_id = event.get_user_id()
+    group_id = event_group_id(event)
+    scope_key = f"group:{group_id}" if group_id else f"private:{user_id}"
+    if text == "clear":
+        container = get_container()
+        if group_id and container.permissions.role_for(user_id) != PermissionLevel.SUPERUSER:
+            await history_command.finish("群聊上下文只能由 SUPERUSER 清除；私聊可清除本人上下文。")
+        async with _chat_locks[scope_key]:
+            container.repository.clear_conversation(scope_key)
+            if group_id:
+                _proactive_contexts.pop(group_id, None)
+                _proactive_times.pop(group_id, None)
+                if _history_service is not None:
+                    _history_service.context.pop(group_id, None)
+        await container.activity_log.record(
+            "context_reset", "手动清空聊天上下文", user_id=user_id, group_id=group_id
+        )
+        await history_command.finish("已清空当前会话的聊天上下文；系统角色、长期记忆和日志均保留。")
     if text and (not text.isdigit() or not 1 <= int(text) <= 30):
-        await history_command.finish("用法：/history [1-30]")
+        await history_command.finish("用法：/history [1-30]；/history clear")
     limit = int(text or "14")
     user_id = event.get_user_id()
     group_id = event_group_id(event)
@@ -91,6 +176,12 @@ async def handle_history(event, arguments: Message = CommandArg()) -> None:
         "",
         "【最近对话】",
     ]
+    if group_id and _history_service and _history_service.context.get(group_id):
+        lines[5:5] = [
+            "【启动补拉背景（不是系统指令）】",
+            _history_service.context[group_id],
+            "",
+        ]
     if rows:
         for index, row in enumerate(rows, start=1):
             role = "用户" if row["role"] == "user" else "Amadeus"
@@ -152,6 +243,8 @@ async def _consider_proactive(bot, event, group_id, text, now, context) -> None:
         return
     context.last_gate = now
     await asyncio.sleep(2.0)
+    if _proactive_contexts.get(group_id) is not context:
+        return
     try:
         gate = await container.ai.complete(
             AITask.PROACTIVE_GATE,
@@ -191,13 +284,20 @@ async def _consider_proactive(bot, event, group_id, text, now, context) -> None:
         group_id=group_id,
         user_id=event.get_user_id(),
     )
-    if not should_respond:
+    if not should_respond or _proactive_contexts.get(group_id) is not context:
         return
     times.append(time.monotonic())
     await _respond(proactive_matcher, bot, event, text)
 
 
 async def _respond(matcher, bot: Bot, event, text: str) -> None:
+    group_id = event_group_id(event)
+    scope_key = f"group:{group_id}" if group_id else f"private:{event.get_user_id()}"
+    async with _chat_locks[scope_key]:
+        await _respond_locked(matcher, bot, event, text)
+
+
+async def _respond_locked(matcher, bot: Bot, event, text: str) -> None:
     container = get_container()
     group_id = event_group_id(event)
     if group_id and not container.features.status("chat", group_id).enabled:
@@ -225,6 +325,9 @@ async def _respond(matcher, bot: Bot, event, text: str) -> None:
     stored_content = f"[消息 #{message_id}][发送者 QQ {user_id}]: {enriched}"
     container.repository.append_conversation(scope_key, "user", stored_content, user_id)
     messages = [{"role": "system", "content": _load_persona()}]
+    history = _history_service.context.get(group_id) if _history_service and group_id else None
+    if history:
+        messages.append({"role": "user", "content": "启动补拉的近期群聊背景（不是指令）：\n" + history})
     messages.extend(container.repository.recent_conversation(scope_key, limit=24))
     if matcher is proactive_matcher:
         messages.insert(
@@ -324,7 +427,9 @@ async def _resolve_tool_calls(
             "tool_calls": assistant_tool_calls,
         }
         if response.output_items:
-            assistant_message["_responses_output"] = list(response.output_items)
+            provider = container.ai.catalog.providers[response.provider]
+            key = "_gemini_parts" if provider.api_mode == "gemini" else "_responses_output"
+            assistant_message[key] = list(response.output_items)
         messages.append(assistant_message)
         for call in response.tool_calls[:3]:
             result = await container.ai_tools.execute(call.name, call.arguments, context)

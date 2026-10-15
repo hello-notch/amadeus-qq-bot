@@ -38,8 +38,8 @@ for spec in (
         name="stick",
         description="给当前消息或被回复消息贴 QQ 表情",
         usage=(
-            "/stick <名称/ID>：给当前消息贴表情；"
-            "回复消息后 /stick <名称/ID>：给被回复消息贴表情；"
+            "/stick <名称/ID/QQ表情>：给当前消息贴表情；"
+            "回复消息后 /stick <名称/ID/QQ表情>：给被回复消息贴表情；"
             "/stick list [起始ID]：查看表情 ID"
         ),
         permission=PermissionLevel.EVERYONE,
@@ -49,7 +49,7 @@ for spec in (
         examples=("/stick 66", "回复消息后 /stick 66", "/stick list 21"),
         notes=(
             "不回复时给 /stick 命令消息本身贴表情；回复时给被回复消息贴表情",
-            "可使用已验证别名或数字 emoji_id",
+            "可使用一个 QQ 表情消息段、已验证别名或数字 emoji_id；不支持表情包或混合参数",
             "贴表情与戳一戳共享串行队列，每次操作之间至少间隔 0.3 秒",
             "list 每次展示 20 个连续 ID 及对应的 QQ 表情消息，可传起始 ID 翻页辨认",
             "已验证别名表位于 data/shared/emoji_ids.json",
@@ -113,22 +113,24 @@ async def handle_stick(bot: Bot, event, arguments: Message = CommandArg()) -> No
     group_id = event_group_id(event)
     if group_id and not get_container().features.status("stick", group_id).enabled:
         await stick_command.finish("当前群已关闭贴表情功能。")
-    tokens = shlex.split(arguments.extract_plain_text())
+    try:
+        tokens = shlex.split(arguments.extract_plain_text())
+    except ValueError:
+        await stick_command.finish("参数错误：引号未闭合。")
     mapping = _emoji_mapping()
-    if tokens and tokens[0] == "list":
+    non_text = [segment for segment in arguments if segment.type != "text"]
+    if tokens and tokens[0] == "list" and not non_text:
         if len(tokens) > 2 or (len(tokens) == 2 and not tokens[1].isdigit()):
             await stick_command.finish("用法：/stick list [起始ID]")
         start = int(tokens[1]) if len(tokens) == 2 else 1
         if not 1 <= start <= 999_999:
             await stick_command.finish("起始 ID 必须在 1～999999。")
         await stick_command.finish(_emoji_list_message(start))
-    if len(tokens) != 1:
-        await stick_command.finish("用法：/stick <名称/emoji_id>；或 /stick list")
     message_id = reaction_target_message_id(event)
     if not message_id:
         await stick_command.finish("无法取得当前消息 ID。")
     try:
-        emoji_id = _resolve_emoji_id(tokens[0], mapping)
+        emoji_id = _stick_argument(arguments, mapping)
     except ValueError as exc:
         await stick_command.finish(f"参数错误：{exc}")
     try:
@@ -195,3 +197,19 @@ def _resolve_emoji_id(value: str, mapping: dict) -> str:
         if lowered in names and item.get("status") == "verified":
             return str(item["emoji_id"])
     raise ValueError("未知表情名称；请用 /stick list 查看已验证别名，或直接提供数字 ID")
+
+
+def _stick_argument(arguments: Message, mapping: dict) -> str:
+    segments = [segment for segment in arguments if segment.type != "text"]
+    text = arguments.extract_plain_text().strip()
+    if segments:
+        if text or len(segments) != 1 or segments[0].type != "face":
+            raise ValueError("请仅提供一个 QQ 表情，不要混合文字、图片或表情包")
+        value = str(segments[0].data.get("id", ""))
+        if not value.isdigit():
+            raise ValueError("QQ 表情缺少有效 ID")
+        return value
+    tokens = shlex.split(text)
+    if len(tokens) != 1:
+        raise ValueError("用法：/stick <名称/emoji_id/QQ表情>；或 /stick list")
+    return _resolve_emoji_id(tokens[0], mapping)

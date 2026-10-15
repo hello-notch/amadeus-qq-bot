@@ -24,17 +24,18 @@ ROUTES_PATH = Path(__file__).resolve().parents[1] / "config" / "ai_routes.toml"
 def test_route_catalog_assigns_cheap_and_quality_models() -> None:
     catalog = AIRouteCatalog.load(ROUTES_PATH)
 
-    assert catalog.default_model.qualified_name == "deepseek/deepseek-v4-flash"
+    assert catalog.default_model.qualified_name == "gemini/gemini-3.8-flash-high"
     assert catalog.routes[AITask.PROACTIVE_GATE].primary.model == "deepseek-v4-flash"
-    assert catalog.routes[AITask.VISION].primary.model == "deepseek-v4-flash-vision-exp"
-    assert catalog.routes[AITask.CHAT].primary.model == "deepseek-v4-flash"
-    assert catalog.routes[AITask.CHAT].fallbacks[0].model == "deepseek-v4-pro"
+    assert catalog.routes[AITask.VISION].primary.model == "gemini-3.8-flash-high"
+    assert catalog.routes[AITask.CHAT].primary.model == "gemini-3.8-flash-high"
+    assert catalog.routes[AITask.CHAT].fallbacks[0].model == "deepseek-v4-flash"
     assert catalog.providers["deepseek"].models == (
         "deepseek-v4-flash",
         "deepseek-v4-pro",
         "deepseek-v4-flash-vision-exp",
     )
-    assert set(catalog.providers) == {"deepseek"}
+    assert set(catalog.providers) == {"deepseek", "gemini", "images"}
+    assert catalog.routes[AITask.IMAGE_GENERATION].primary.model == "gpt-image-2.5"
     assert catalog.providers["deepseek"].thinking_enabled is False
     assert catalog.routes[AITask.SUMMARY].max_tokens == 16384
     assert catalog.routes[AITask.STATS_ANALYSIS].max_tokens == 16384
@@ -288,7 +289,7 @@ async def test_ai_service_switches_and_persists_active_model(tmp_path: Path) -> 
     }
     service = AIService(catalog, credentials, repository)
     try:
-        assert service.current_model().qualified_name == "deepseek/deepseek-v4-flash"
+        assert service.current_model().qualified_name == "gemini/gemini-3.8-flash-high"
         assert len(service.available_models()) == 3
         switched = service.switch_model("deepseek-v4-pro", "999")
         assert switched.qualified_name == "deepseek/deepseek-v4-pro"
@@ -304,7 +305,7 @@ async def test_ai_service_switches_and_persists_active_model(tmp_path: Path) -> 
     repository.set_runtime_setting("ai.active_model", "huanyan/gpt-5.6-luna", "999")
     migrated = AIService(catalog, credentials, repository)
     try:
-        assert migrated.current_model().qualified_name == "deepseek/deepseek-v4-flash"
+        assert migrated.current_model().qualified_name == "gemini/gemini-3.8-flash-high"
         assert {target.provider for target in migrated.available_models()} == {"deepseek"}
     finally:
         await migrated.close()

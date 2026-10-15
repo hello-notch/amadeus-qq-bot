@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from amadeus_bot.domain.messages import MessageRecord, SegmentRecord
-from amadeus_bot.services.event_utils import event_group_id
+from amadeus_bot.services.event_utils import event_group_id, reply_message_id
 
 
 class MessageNormalizer:
@@ -18,6 +18,9 @@ class MessageNormalizer:
         segments = tuple(
             SegmentRecord(type=str(segment.type), data=dict(segment.data)) for segment in event.get_message()
         )
+        reply_id = reply_message_id(event)
+        if reply_id and not any(segment.type == "reply" for segment in segments):
+            segments = (SegmentRecord(type="reply", data={"id": reply_id}), *segments)
         return MessageRecord(
             message_id=str(getattr(event, "message_id", "")),
             direction=direction,

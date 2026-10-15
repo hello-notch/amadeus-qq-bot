@@ -148,6 +148,20 @@ class Simulator:
                 return self.member(user)
         if action == "get_group_list":
             return [{"group_id": GROUP_ID, "group_name": "模拟群聊", "member_count": len(USERS)}]
+        if action == "get_group_msg_history" and int(params.get("group_id") or 0) == GROUP_ID:
+            rows = [row for row in self.messages if row["scope"] == "group"]
+            return {
+                "messages": [
+                    {
+                        "message_id": row["message_id"],
+                        "time": row["time"],
+                        "user_id": row["user_id"],
+                        "group_id": GROUP_ID,
+                        "message": row["segments"],
+                    }
+                    for row in rows[-min(int(params.get("count") or 24), 100) :]
+                ]
+            }
         if action == "get_friend_list":
             return [{"user_id": u["user_id"], "nickname": u["nickname"]} for u in USERS]
         if action == "get_login_info":
@@ -163,9 +177,15 @@ class Simulator:
                 u["user_id"] for u in USERS
             }:
                 raise ValueError("用户不存在")
+            scope = "group" if action != "friend_poke" else "private"
+            recipient = int(params.get("user_id") or 0)
+            if action == "set_msg_emoji_like":
+                target = self.by_id[int(params["message_id"])]
+                scope = target["scope"]
+                recipient = int(target.get("recipient_id") or target["user_id"])
             self.record(
-                "group" if action != "friend_poke" else "private",
-                int(params.get("user_id") or 0),
+                scope,
+                recipient,
                 [{"type": "text", "data": {"text": f"[API: {action} {params}]"}}],
                 bot=True,
             )
@@ -348,11 +368,13 @@ def make_app(sim: Simulator, bot_port: int) -> FastAPI:
 
     @app.get("/api/media/{name}")
     async def media(name: str):
-        cache = (sim.root / "data" / "cache" / "render").resolve()
-        path = (cache / name).resolve()
-        if path.parent != cache or path.suffix.lower() != ".png" or not path.is_file():
-            raise HTTPException(404)
-        return FileResponse(path, media_type="image/png")
+        media_types = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
+        for kind in ("render", "generated"):
+            cache = (sim.root / "data" / "cache" / kind).resolve()
+            path = (cache / name).resolve()
+            if path.parent == cache and path.suffix.lower() in media_types and path.is_file():
+                return FileResponse(path, media_type=media_types[path.suffix.lower()])
+        raise HTTPException(404)
 
     @app.post("/api/send")
     async def send(payload: SendRequest, request: Request):

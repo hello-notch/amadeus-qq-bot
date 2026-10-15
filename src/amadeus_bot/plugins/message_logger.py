@@ -111,7 +111,7 @@ async def log_bot_api(
         summary,
         user_id=user_id or str(bot.self_id),
         group_id=group_id,
-        message_id=_result_message_id(result),
+        message_id=_result_message_id(result) or str(data.get("message_id") or "") or None,
         details={"api": api, "data": _safe_api_data(api, data)},
     )
 

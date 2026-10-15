@@ -9,14 +9,28 @@ models = [
     "deepseek-v4-flash-vision-exp",
 ]
 
+[providers.gemini]
+credential_host = "36.139.40.114"
+api_prefix = "v1beta"
+api_mode = "gemini"
+thinking_level = "high"
+models = ["gemini-3.8-flash-high"]
+
+[providers.images]
+credential_host = "36.139.40.114"
+api_prefix = "v1"
+api_mode = "images"
+models = ["gpt-image-2.5"]
+image_models = ["gpt-image-2.5"]
+
 [runtime]
-default_model = "deepseek/deepseek-v4-flash"
+default_model = "gemini/gemini-3.8-flash-high"
 
 [tasks.chat]
-primary = "deepseek/deepseek-v4-flash"
-fallbacks = ["deepseek/deepseek-v4-pro"]
+primary = "gemini/gemini-3.8-flash-high"
+fallbacks = ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"]
 temperature = 0.75
-max_tokens = 1800
+max_tokens = 8192
 
 [tasks.tool_planner]
 primary = "deepseek/deepseek-v4-flash"
@@ -49,8 +63,8 @@ temperature = 0.0
 max_tokens = 700
 
 [tasks.vision]
-primary = "deepseek/deepseek-v4-flash-vision-exp"
-fallbacks = []
+primary = "gemini/gemini-3.8-flash-high"
+fallbacks = ["deepseek/deepseek-v4-flash-vision-exp"]
 temperature = 0.2
 max_tokens = 1000
 
@@ -59,3 +73,9 @@ primary = "deepseek/deepseek-v4-pro"
 fallbacks = ["deepseek/deepseek-v4-flash"]
 temperature = 0.25
 max_tokens = 2400
+
+[tasks.image_generation]
+primary = "images/gpt-image-2.5"
+fallbacks = []
+temperature = 1.0
+max_tokens = 8192

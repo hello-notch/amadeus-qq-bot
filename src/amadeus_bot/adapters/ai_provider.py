@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import dataclass
@@ -10,6 +11,10 @@ import httpx
 from nonebot.log import logger
 
 from amadeus_bot.domain.ai import AIResponse, ToolCall
+
+
+class AIProviderRateLimited(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +36,8 @@ class ProviderConfig:
     responses_stream: bool = False
     thinking_enabled: bool = True
     models: tuple[str, ...] = ()
+    thinking_level: str = ""
+    image_models: tuple[str, ...] = ()
 
 
 class CredentialStore:
@@ -84,6 +91,8 @@ class OpenAICompatibleProvider:
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
     ) -> AIResponse:
+        if self.config.api_mode == "images":
+            return await self._complete_image(model=model, messages=messages)
         if self.config.api_mode == "responses":
             return await self._complete_responses(
                 model=model,
@@ -98,6 +107,45 @@ class OpenAICompatibleProvider:
             temperature=temperature,
             max_tokens=max_tokens,
             tools=tools,
+        )
+
+    async def _complete_image(self, *, model: str, messages: list[dict[str, Any]]) -> AIResponse:
+        prompt = "\n".join(
+            str(message["content"])
+            for message in messages
+            if message.get("role") == "user" and isinstance(message.get("content"), str)
+        )
+        if not prompt.strip():
+            raise ValueError("Image generation prompt is empty")
+        response = await self._client.post(
+            f"{self.api_base}/images/generations",
+            json={"model": model, "prompt": prompt, "n": 1, "size": "1024x1024", "output_format": "png"},
+        )
+        if response.status_code == 429:
+            raise AIProviderRateLimited("Image provider returned HTTP 429")
+        if response.status_code >= 400:
+            raise RuntimeError(f"AI provider {self.config.name} returned HTTP {response.status_code}")
+        data = response.json()
+        images: list[bytes] = []
+        for item in data.get("data") or []:
+            encoded = str(item.get("b64_json") or "")
+            if not encoded or len(encoded) > 20 * 1024 * 1024:
+                raise ValueError("Image provider returned missing or oversized image data")
+            image = base64.b64decode(encoded, validate=True)
+            if not image or len(image) > 10 * 1024 * 1024:
+                raise ValueError("Image provider returned empty or oversized image")
+            images.append(image)
+        if not images:
+            raise RuntimeError("Image provider returned no images")
+        usage = data.get("usage") or {}
+        return AIResponse(
+            content="",
+            provider=self.config.name,
+            model=model,
+            images=tuple(images),
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            raw_usage=usage,
         )
 
     async def _complete_chat(

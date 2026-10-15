@@ -57,7 +57,8 @@ class ActivityLogService:
             await asyncio.to_thread(self._append, json_path, text_path, entry, human)
         if console:
             level = "ERROR" if status == "failed" or kind == "error" else "INFO"
-            logger.bind(amadeus_activity=True, activity_kind=kind).log(level, human.split(" | ", 1)[-1])
+            prefix = f"[消息 #{message_id}] " if message_id else ""
+            logger.bind(amadeus_activity=True, activity_kind=kind).log(level, prefix + entry["summary"])
 
     def recent(
         self,
@@ -106,7 +107,8 @@ class ActivityLogService:
                 if row.get("user_id")
                 else "系统"
             )
-            lines.append(f"{timestamp} [{label}] {scope}\n{row.get('summary') or '-'}")
+            message = f" message=#{row['message_id']}" if row.get("message_id") else ""
+            lines.append(f"{timestamp} [{label}] {scope}{message}\n{row.get('summary') or '-'}")
         return "\n\n".join(lines)
 
     @staticmethod
@@ -132,6 +134,8 @@ class ActivityLogService:
         else:
             scope = "system"
         status = "" if entry["status"] == "success" else f" {entry['status']}"
+        if entry.get("message_id"):
+            scope += f" message=#{entry['message_id']}"
         return f"{now:%H:%M:%S} {label}{status} {scope} | {entry['summary']}"
 
 
@@ -152,7 +156,7 @@ def summarize_message(message: Iterable[Any], *, reply_id: str | None = None) ->
             location = data.get("path") or data.get("url") or data.get("file") or data.get("id")
             parts.append(f"[{kind}: {_clean(str(location or '无地址'), 300)}]")
         elif kind == "face":
-            parts.append(f"[表情 id={data.get('id') or '?'}]")
+            parts.append(f"[表情 id={data.get('id', '?')}]")
         elif kind == "reply":
             if not reply_id:
                 parts.append(f"[回复 #{data.get('id') or '?'}]")
@@ -178,15 +182,23 @@ def summarize_notice(event: Any) -> tuple[str, str, str | None, str | None, dict
     group_id = str(getattr(event, "group_id", "") or "") or None
     details = {
         key: getattr(event, key)
-        for key in ("target_id", "operator_id", "message_id", "emoji_id", "file")
+        for key in ("target_id", "operator_id", "message_id", "emoji_id", "likes", "file")
         if getattr(event, key, None) is not None
     }
     if notice_type == "notify" and sub_type == "poke":
         summary = f"{user_id or '?'} 戳了 {getattr(event, 'target_id', '?')}"
     elif notice_type == "group_msg_emoji_like":
+        likes = getattr(event, "likes", None) or []
+        ids = [
+            str(item["emoji_id"])
+            for item in likes
+            if isinstance(item, dict) and item.get("emoji_id") is not None
+        ]
+        if not ids and getattr(event, "emoji_id", None) is not None:
+            ids.append(str(event.emoji_id))
         summary = (
             f"{user_id or '?'} 对消息 #{getattr(event, 'message_id', '?')} "
-            f"回应表情 {getattr(event, 'emoji_id', '?')}"
+            f"回应表情 {', '.join(ids) if ids else '[事件未提供表情 ID]'}"
         )
     else:
         summary = f"{notice_type}{'.' + sub_type if sub_type else ''}：{details or '无附加字段'}"

@@ -14,7 +14,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 async def main() -> None:
-    with tempfile.TemporaryDirectory(prefix="amadeus-tool-probe-") as temporary:
+    parent = PROJECT_ROOT / "test-tmp"
+    await asyncio.to_thread(parent.mkdir, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="amadeus-tool-probe-", dir=parent) as temporary:
         runtime = Path(temporary)
         paths = AppPaths(
             project_root=PROJECT_ROOT,
@@ -48,6 +50,8 @@ async def main() -> None:
             print(
                 f"provider={response.provider} model={response.model} tool_calls={len(response.tool_calls)}"
             )
+            if not response.tool_calls:
+                raise RuntimeError("Tool probe did not return a tool call")
             assistant_calls = [
                 {
                     "id": call.call_id,
@@ -65,7 +69,9 @@ async def main() -> None:
                 "tool_calls": assistant_calls,
             }
             if response.output_items:
-                assistant_message["_responses_output"] = list(response.output_items)
+                mode = container.ai.catalog.providers[response.provider].api_mode
+                key = "_gemini_parts" if mode == "gemini" else "_responses_output"
+                assistant_message[key] = list(response.output_items)
             messages.append(assistant_message)
             for call in response.tool_calls:
                 result_text = await container.ai_tools.execute(
@@ -85,6 +91,8 @@ async def main() -> None:
                     f"tool={call.name} argument_keys={sorted(call.arguments)} "
                     f"success={bool(result.get('success'))}"
                 )
+                if not result.get("success"):
+                    raise RuntimeError("Tool probe execution failed")
             final = await container.ai.complete(
                 AITask.CHAT,
                 messages,
@@ -95,6 +103,8 @@ async def main() -> None:
                 f"follow_up_provider={final.provider} model={final.model} "
                 f"tool_calls={len(final.tool_calls)} nonempty={bool(final.content.strip())}"
             )
+            if final.tool_calls or not final.content.strip():
+                raise RuntimeError("Tool probe did not finish with text")
         finally:
             await container.close()
 

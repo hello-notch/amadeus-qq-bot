@@ -143,7 +143,19 @@ async def handle_summary(event, arguments: Message = CommandArg()) -> None:
         await summary_command.finish(f"参数错误：{exc}")
     transcript = service.ai_transcript(window, max_chars=8_000)
     if len(window.effective_records) < 3 or len(transcript) < 30:
-        await summary_command.finish("有效消息不足，未调用 AI 总结。")
+        await get_container().activity_log.record(
+            "summary",
+            f"总结样本不足：hours={hours} records={len(window.records)} "
+            f"effective={len(window.effective_records)}",
+            group_id=group_id,
+            user_id=event.get_user_id(),
+            message_id=str(event.message_id),
+        )
+        await summary_command.finish(
+            f"最近 {hours} 小时本地记录 {len(window.records)} 条，"
+            f"有效消息 {len(window.effective_records)} 条，不足 3 条，未调用 AI 总结。"
+            "只统计已记录或补拉的消息，不代表完整群历史。"
+        )
     prompt = (
         "总结以下群聊，输出：主要话题、结论/决定、待办、链接/资料、未解决问题、轻松时刻。"
         "不要泄露其他群信息，不要编造。\n\n" + transcript
