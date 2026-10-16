@@ -41,7 +41,7 @@ class SendRequest(BaseModel):
 
 
 class Simulator:
-    def __init__(self, root: Path = ROOT) -> None:
+    def __init__(self, root: Path = ROOT, *, bot_role: str = "admin") -> None:
         self.root = root
         self.messages: deque[dict[str, Any]] = deque(maxlen=400)
         self.by_id: dict[int, dict[str, Any]] = {}
@@ -50,6 +50,11 @@ class Simulator:
         self.process: asyncio.subprocess.Process | None = None
         self.log_file: Any = None
         self.error = ""
+        if bot_role not in {"admin", "member"}:
+            raise ValueError("模拟机器人身份只能是 admin 或 member")
+        self.bot_role = bot_role
+        self.cards: dict[int, str] = {}
+        self.bans: dict[int, int] = {}
 
     def next_id(self) -> int:
         self.sequence += 1
@@ -141,11 +146,31 @@ class Simulator:
                 "message": row["segments"],
             }
         if action == "get_group_member_list" and int(params.get("group_id") or 0) == GROUP_ID:
-            return [self.member(user) for user in USERS]
+            return [self._group_member(user) for user in USERS]
         if action == "get_group_member_info" and int(params.get("group_id") or 0) == GROUP_ID:
             user = next((u for u in USERS if u["user_id"] == int(params.get("user_id") or 0)), None)
             if user:
-                return self.member(user)
+                return self._group_member(user)
+            if int(params.get("user_id") or 0) == BOT_ID:
+                return self.member({"user_id": BOT_ID, "nickname": "Amadeus", "role": self.bot_role})
+        if action in {"set_group_card", "set_group_ban"}:
+            target = int(params.get("user_id") or 0)
+            if int(params.get("group_id") or 0) != GROUP_ID:
+                raise ValueError("群不存在")
+            member = next((u for u in USERS if u["user_id"] == target), None)
+            if self.bot_role != "admin" or member is None or member["role"] != "member":
+                raise ValueError("机器人权限不足或目标不存在/不可管理")
+            if action == "set_group_card":
+                self.cards[target] = str(params["card"])
+            else:
+                duration = params["duration"]
+                if type(duration) is not int or not 0 <= duration <= 2592000:
+                    raise ValueError("禁言秒数越界")
+                self.bans[target] = duration
+            self.record(
+                "group", 0, [{"type": "text", "data": {"text": f"[API: {action} {params}]"}}], bot=True
+            )
+            return {}
         if action == "get_group_list":
             return [{"group_id": GROUP_ID, "group_name": "模拟群聊", "member_count": len(USERS)}]
         if action == "get_group_msg_history" and int(params.get("group_id") or 0) == GROUP_ID:
@@ -191,6 +216,12 @@ class Simulator:
             )
             return {}
         raise ValueError(f"模拟器未实现 OneBot API: {action}")
+
+    def _group_member(self, user: dict) -> dict:
+        row = self.member(user)
+        row["card"] = self.cards.get(user["user_id"], row["card"])
+        row["shut_up_timestamp"] = self.bans.get(user["user_id"], 0)
+        return row
 
     @staticmethod
     def member(user: dict) -> dict:
@@ -306,6 +337,7 @@ def isolated_environment(root: Path, bot_port: int) -> dict[str, str]:
             "HOST": "127.0.0.1",
             "PORT": str(bot_port),
             "COMMAND_START": '["/",""]',
+            "PYTHONIOENCODING": "utf-8",
         }
     )
     return env
@@ -433,7 +465,7 @@ def main() -> None:
                 probe.bind(("127.0.0.1", port))
             except OSError as exc:
                 raise SystemExit(f"本地端口 {port} 已占用") from exc
-    sim = Simulator()
+    sim = Simulator(bot_role=os.getenv("SIMULATOR_BOT_ROLE", "admin"))
     print(f"模拟群聊与私聊：http://127.0.0.1:{ui_port}", flush=True)
     uvicorn.run(make_app(sim, bot_port), host="127.0.0.1", port=ui_port, log_level="warning")
 

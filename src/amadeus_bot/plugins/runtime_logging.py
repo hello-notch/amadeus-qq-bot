@@ -22,6 +22,7 @@ _NOISY_MESSAGES = (
 async def configure_compact_runtime_logging() -> None:
     """Keep startup discovery output, then switch to concise runtime logs."""
 
+    _configure_stdout()
     runtime_log = get_container().paths.logs / "runtime" / "runtime.log"
     runtime_log.parent.mkdir(parents=True, exist_ok=True)
     logger.remove()
@@ -49,6 +50,12 @@ async def configure_compact_runtime_logging() -> None:
     logger.bind(amadeus_activity=True, activity_kind="system").info(
         "简洁日志处理器已启用；详细活动记录写入 logs/activity/"
     )
+
+
+def _configure_stdout() -> None:
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def _compact_filter(record: dict[str, Any]) -> bool:

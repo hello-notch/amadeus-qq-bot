@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from amadeus_bot.repositories.core import CoreRepository
 from amadeus_bot.repositories.database import CoreDatabase
@@ -133,6 +135,40 @@ async def test_ai_stick_defaults_to_current_message_and_accepts_arbitrary_batch(
         ("set_msg_emoji_like", {"message_id": 12, "emoji_id": 387, "set": True}),
         ("set_msg_emoji_like", {"message_id": 99, "emoji_id": 387, "set": True}),
     ]
+
+
+async def test_group_admin_tool_returns_bot_permission_error_without_write(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    bot = FakeBot()
+    bot.get_group_member_info = AsyncMock(
+        side_effect=lambda **kwargs: {
+            "user_id": kwargs["user_id"],
+            "role": "member" if kwargs["user_id"] == 999 else "owner",
+        }
+    )
+    context = ToolExecutionContext.for_requester("100", "1", bot=bot)
+    result = json.loads(await tools.execute("group_card", {"target_user_id": "30", "card": "test"}, context))
+    assert result["success"] is False
+    assert "机器人不是" in result["error"]
+    assert bot.calls == []
+
+
+async def test_image_tool_clears_thinking_before_sending_output(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    timeline = []
+    tools.image_generation = SimpleNamespace(generate=AsyncMock(return_value=tmp_path / "image.png"))
+
+    async def clear():
+        timeline.append("clear")
+
+    async def send(**_kwargs):
+        timeline.append("send")
+
+    context = ToolExecutionContext.for_requester(
+        "100", "1", bot=SimpleNamespace(send_group_msg=send), before_send=clear
+    )
+    result = json.loads(await tools.execute("image_generate", {"prompt": "test"}, context))
+    assert result["success"] is True and timeline == ["clear", "send"]
 
 
 async def test_ai_can_fetch_recent_message_ids_and_cq_mentions(tmp_path: Path) -> None:

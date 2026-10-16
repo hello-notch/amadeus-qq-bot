@@ -126,6 +126,7 @@ async def handle_stats(event, arguments: Message = CommandArg()) -> None:
         base + "\n\n【AI 分析（仅代表该时段）】\n" + analysis,
         title="水群统计",
         force_image=True,
+        markdown=True,
     )
 
 
@@ -180,6 +181,7 @@ async def handle_summary(event, arguments: Message = CommandArg()) -> None:
         heading + result.content.strip(),
         title="群聊总结",
         force_image=True,
+        markdown=True,
     )
 
 

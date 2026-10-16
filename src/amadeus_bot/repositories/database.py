@@ -22,6 +22,13 @@ class CoreDatabase:
                 connection.execute(
                     "ALTER TABLE recommendations ADD COLUMN image_path TEXT NOT NULL DEFAULT ''"
                 )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(conversation_messages)")}
+            if "message_id" not in columns:
+                connection.execute("ALTER TABLE conversation_messages ADD COLUMN message_id TEXT")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_message "
+                "ON conversation_messages(scope_key, message_id) WHERE message_id IS NOT NULL"
+            )
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -149,6 +156,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     scope_key TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
     user_id TEXT,
+    message_id TEXT,
     content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

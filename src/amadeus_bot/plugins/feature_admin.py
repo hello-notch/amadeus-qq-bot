@@ -20,8 +20,8 @@ command_registry.register(
         usage=(
             "/feature list [group_id]：列出开关；"
             "/feature status <feature> [group_id]：查看开关状态；"
-            "/feature enable <feature> <group_id/global>：开启功能；"
-            "/feature disable <feature> <group_id/global>：关闭功能；"
+            "/feature enable <feature> [group_id/global]：开启功能；"
+            "/feature disable <feature> [group_id/global]：关闭功能；"
             "/feature reset <feature> <group_id>：移除群级覆盖；"
             "/feature ignore list：查看忽略规则；"
             "/feature ignore add <QQ> [group_id/global]：添加忽略规则；"
@@ -39,6 +39,7 @@ command_registry.register(
             "全部子命令仅 SUPERUSER 可用，AI 无权调用",
             "群级设置优先于全局设置；reset 删除群级覆盖并恢复全局值",
             "ignore 默认同时排除 AI 主动分析和群统计",
+            "feature 管理业务开关；enable/disable 管理命令权限，两者独立；群内省略作用域则使用当前群",
         ),
     )
 )
@@ -68,14 +69,20 @@ def _execute(tokens: list[str], actor: str, current_group_id: str | None) -> str
         lines = [f"群 {group_id} 功能状态："]
         for feature in service.registered_features():
             status = service.status(feature, group_id)
-            lines.append(f"{feature}: {'ON' if status.enabled else 'OFF'} ({status.source})")
+            lines.append(
+                f"{feature}: {'ON' if status.enabled else 'OFF'} ({status.source})"
+                + _command_restrictions(feature, group_id)
+            )
         return "\n".join(lines)
     if action == "status":
         if len(tokens) < 2:
             raise ValueError("用法：/feature status <feature> [group_id]")
         group_id = tokens[2] if len(tokens) > 2 else current_group_id
         status = service.status(tokens[1], group_id)
-        return f"{status.feature}: {'ON' if status.enabled else 'OFF'}，来源：{status.source}"
+        return (
+            f"{status.feature}: {'ON' if status.enabled else 'OFF'}，来源：{status.source}"
+            + _command_restrictions(status.feature, group_id)
+        )
     if action in {"enable", "disable"}:
         if len(tokens) < 2:
             raise ValueError(f"用法：/feature {action} <feature> [group_id/global]")
@@ -85,7 +92,20 @@ def _execute(tokens: list[str], actor: str, current_group_id: str | None) -> str
         status = service.set(tokens[1], scope, action == "enable", actor)
         trace_id = _audit(actor, current_group_id, action, f"{tokens[1]}:{scope}:{status.enabled}")
         value = "ON" if status.enabled else "OFF"
-        return f"已设置 {status.feature}={value}，来源：{status.source}\n审计 ID：{trace_id}"
+        effective_group = current_group_id if scope == "global" else scope
+        effective = service.status(status.feature, effective_group)
+        return (
+            f"已设置功能开关 {status.feature}={value}，来源：{status.source}"
+            + (
+                f"\n群 {effective_group} 实际开关：{'ON' if effective.enabled else 'OFF'}"
+                f"（来源：{effective.source}）"
+                if scope == "global" and effective_group
+                else ""
+            )
+            + _command_restrictions(status.feature, effective_group)
+            + "\n命令权限独立；全局设置不覆盖群设置。\n"
+            + f"审计 ID：{trace_id}"
+        )
     if action == "reset":
         if len(tokens) != 3:
             raise ValueError("用法：/feature reset <feature> <group_id>")
@@ -95,6 +115,21 @@ def _execute(tokens: list[str], actor: str, current_group_id: str | None) -> str
     if action == "ignore":
         return _execute_ignore(tokens[1:], actor, current_group_id)
     raise ValueError(f"未知子命令：{action}")
+
+
+def _command_restrictions(feature: str, group_id: str | None) -> str:
+    if not group_id:
+        return ""
+    restricted = [
+        spec.name
+        for spec in command_registry.all()
+        if spec.feature == feature and get_container().repository.command_disabled(group_id, spec.name)
+    ]
+    if not restricted:
+        return ""
+    return "\n命令仍仅 SUPERUSER 可用：" + "、".join(
+        f"/{name}（/enable {name} 恢复普通权限）" for name in restricted
+    )
 
 
 def _execute_ignore(tokens: list[str], actor: str, current_group_id: str | None) -> str:

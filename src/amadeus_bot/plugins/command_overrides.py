@@ -18,7 +18,10 @@ for action in ("enable", "disable"):
             usage=f"/{action} <命令>",
             permission=PermissionLevel.SUPERUSER,
             examples=(f"/{action} chat",),
-            notes=("仅在当前群生效；只接受原权限为 EVERYONE 的命令或别名",),
+            notes=(
+                "仅在当前群生效；只接受原权限为 EVERYONE 的命令或别名",
+                "只调整命令权限，不修改 feature 业务开关；disable 后 SUPERUSER 仍可使用",
+            ),
         )
     )
 
@@ -57,7 +60,14 @@ async def _set_override(event, arguments: Message, disabled: bool, matcher) -> N
     if spec is None or spec.permission != PermissionLevel.EVERYONE:
         await matcher.finish("请输入一个原权限为 EVERYONE 的命令。")
     get_container().repository.set_command_override(group_id, spec.name, disabled, event.get_user_id())
-    await matcher.finish(f"已{'关闭' if disabled else '开启'}/{spec.name}（当前群）。")
+    result = (
+        f"已将 /{spec.name} 限为 SUPERUSER 使用（当前群）。"
+        if disabled
+        else f"已恢复 /{spec.name} 的普通命令权限（当前群）。"
+    )
+    if spec.feature and not get_container().features.status(spec.feature, group_id).enabled:
+        result += f"\n功能开关 {spec.feature} 仍为 OFF，请使用 /feature enable {spec.feature}。"
+    await matcher.finish(result)
 
 
 @enable_command.handle()

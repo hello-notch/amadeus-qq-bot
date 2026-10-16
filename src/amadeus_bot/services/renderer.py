@@ -229,7 +229,15 @@ class RenderService:
             raise ValueError("Markdown 内容超过 30000 字符")
         renderer = MarkdownIt("commonmark", {"html": False, "linkify": False, "typographer": False})
         safe_markdown = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"[外链图片已阻止：\1]", content)
-        rendered = renderer.render(safe_markdown)
+        tokens = renderer.parse(safe_markdown)
+        # Block reference-style images too; rendering must never fetch external media.
+        for token in tokens:
+            for child in token.children or []:
+                if child.type == "image":
+                    child.type = "text"
+                    child.content = f"[外链图片已阻止：{child.content}]"
+                    child.children = None
+        rendered = renderer.renderer.render(tokens, renderer.options, {})
         return await self._render(
             content,
             title=title,
@@ -262,6 +270,7 @@ class RenderService:
             )
             temporary = output_path.with_suffix(".tmp.png")
             try:
+                await page.route("**/*", lambda route: route.abort())
                 await page.set_content(
                     self._build_html(html_body, title),
                     wait_until="load",

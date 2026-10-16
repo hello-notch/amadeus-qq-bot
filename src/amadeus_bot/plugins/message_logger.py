@@ -13,9 +13,10 @@ from amadeus_bot.services.activity_log import (
     summarize_message,
     summarize_notice,
 )
+from amadeus_bot.services.conversation import record_inbound
 from amadeus_bot.services.message_log import MessageLogService, MessageNormalizer
 
-message_listener = on_message(priority=1, block=False)
+message_listener = on_message(priority=0, block=False)
 notice_listener = on_notice(priority=1, block=False)
 _service: MessageLogService | None = None
 
@@ -26,6 +27,7 @@ async def handle_message_log(event) -> None:
     container = get_container()
     if not container.memory.logging_enabled(event.get_user_id()):
         return
+    record_inbound(container, event)
     if _service is None:
         _service = MessageLogService(container.paths.logs)
     try:

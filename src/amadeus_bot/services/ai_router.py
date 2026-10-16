@@ -6,6 +6,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from nonebot.log import logger
+
 from amadeus_bot.adapters.ai_provider import (
     AIProviderRateLimited,
     ApiCredential,
@@ -15,6 +17,7 @@ from amadeus_bot.adapters.ai_provider import (
 from amadeus_bot.adapters.gemini_provider import GeminiProvider
 from amadeus_bot.domain.ai import AIResponse, AITask, ModelTarget, TaskRoute
 from amadeus_bot.repositories.core import CoreRepository
+from amadeus_bot.services.ai_errors import AIInvocationError, failure_reason
 
 
 class AIRouteCatalog:
@@ -199,10 +202,16 @@ class AIService:
             if task in {AITask.VISION, AITask.SUMMARY, AITask.STATS_ANALYSIS, AITask.IMAGE_GENERATION}
             else (self.current_model(), route.primary, *route.fallbacks)
         )
-        for target in targets:
+        for attempt, target in enumerate(targets, 1):
             provider = self.providers.get(target.provider)
             if provider is None:
                 errors.append(f"{target.provider}:credential-unavailable")
+                logger.warning(
+                    "AI 路由跳过 task={} provider={} model={} reason=凭据未配置",
+                    task.value,
+                    target.provider,
+                    target.model,
+                )
                 continue
             started = time.perf_counter()
             try:
@@ -229,7 +238,24 @@ class AIService:
                     user_id=user_id,
                     error_type=error_type,
                 )
-                errors.append(f"{target.provider}/{target.model}:{error_type}")
+                reason = failure_reason(exc)
+                diagnostic = f"{target.qualified_name}:{error_type} ({reason}; elapsed_ms={latency_ms})"
+                errors.append(diagnostic)
+                logger.warning(
+                    "AI 调用失败 task={} provider={} model={} attempt={}/{} "
+                    "elapsed_ms={} error={} reason={} group={} user={} next={}",
+                    task.value,
+                    target.provider,
+                    target.model,
+                    attempt,
+                    len(targets),
+                    latency_ms,
+                    error_type,
+                    reason,
+                    group_id or "-",
+                    user_id or "-",
+                    "fallback" if attempt < len(targets) else "stop",
+                )
                 continue
             latency_ms = int((time.perf_counter() - started) * 1000)
             self.repository.record_ai_usage(
@@ -244,10 +270,14 @@ class AIService:
                 group_id=group_id,
                 user_id=user_id,
             )
+            if errors:
+                logger.info(
+                    "AI 路由回退成功 task={} provider={} model={}", task.value, result.provider, result.model
+                )
             return result
         if rate_limited:
-            raise AIProviderRateLimited("供应商当前配额已耗尽或限流")
-        raise RuntimeError("所有 AI 路由均不可用：" + "; ".join(errors))
+            raise AIProviderRateLimited("供应商当前配额已耗尽或限流：" + "; ".join(errors))
+        raise AIInvocationError("所有 AI 路由均不可用：" + "; ".join(errors))
 
     async def close(self) -> None:
         for provider in self.providers.values():

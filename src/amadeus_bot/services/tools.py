@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from amadeus_bot.services.courses import CourseService, parse_sections, parse_we
 from amadeus_bot.services.ddl import DDLService, format_ddl
 from amadeus_bot.services.event_utils import cq_message_text
 from amadeus_bot.services.feature_flags import FeatureFlagService
+from amadeus_bot.services.group_admin import GroupAdminService
 from amadeus_bot.services.image_generation import ImageGenerationService
 from amadeus_bot.services.interactions import (
     MAX_POKES_PER_MINUTE,
@@ -37,6 +39,7 @@ class ToolExecutionContext:
     bot: Any | None = None
     replied_message_id: str | None = None
     current_message_id: str | None = None
+    before_send: Callable[[], Awaitable[None]] | None = None
 
     @classmethod
     def for_requester(
@@ -47,6 +50,7 @@ class ToolExecutionContext:
         bot: Any | None = None,
         replied_message_id: str | None = None,
         current_message_id: str | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolExecutionContext:
         normalized = str(user_id)
         return cls(
@@ -56,6 +60,7 @@ class ToolExecutionContext:
             bot=bot,
             replied_message_id=replied_message_id,
             current_message_id=current_message_id,
+            before_send=before_send,
         )
 
 
@@ -89,6 +94,27 @@ class AIToolService:
 
     def schemas(self) -> list[dict[str, Any]]:
         return [
+            _function(
+                "group_card",
+                "修改当前群成员名片（不是全局昵称）；请求者与机器人均须有群管理权限；仅执行本轮请求者明确要求的操作",
+                {
+                    "target_user_id": {"type": "string", "pattern": "^[0-9]+$"},
+                    "card": {"type": "string", "maxLength": 60},
+                },
+                ["target_user_id", "card"],
+            ),
+            _function(
+                "group_ban",
+                (
+                    "禁言当前群成员；0 秒解除禁言，最多30天；请求者与机器人均须有群管理权限；"
+                    "仅执行本轮请求者明确要求的操作"
+                ),
+                {
+                    "target_user_id": {"type": "string", "pattern": "^[0-9]+$"},
+                    "duration": {"type": "integer", "minimum": 0, "maximum": 2592000},
+                },
+                ["target_user_id", "duration"],
+            ),
             _function(
                 "image_generate",
                 "仅在用户明确要求画图或生成图片时调用 GPT Image 2.5，成功后直接发送图片；不要重复调用",
@@ -335,6 +361,19 @@ class AIToolService:
         if context.requested_by != context.subject_user_id:
             return _result(False, error="AI 不得指定无关用户为数据主体")
         try:
+            if name in {"group_card", "group_ban"}:
+                command = "groupcard" if name == "group_card" else "mute"
+                if context.group_id and self.repository.command_disabled(context.group_id, command):
+                    return _result(False, error=f"/{command} 已被限制，AI 不得绕过")
+                result = await GroupAdminService(self.features).execute(
+                    name,
+                    bot=context.bot,
+                    group_id=context.group_id,
+                    actor=context.requested_by,
+                    target=str(arguments["target_user_id"]),
+                    value=arguments["card" if name == "group_card" else "duration"],
+                )
+                return json.dumps(result, ensure_ascii=False)
             if name == "image_generate":
                 if not self._feature_enabled("image_generation", context):
                     return _result(False, error="当前群已关闭图像生成")
@@ -346,6 +385,8 @@ class AIToolService:
                     str(arguments["prompt"]), context.requested_by, context.group_id
                 )
                 message = Message(MessageSegment.image(path.resolve().as_uri()))
+                if context.before_send is not None:
+                    await context.before_send()
                 if context.group_id:
                     await context.bot.send_group_msg(group_id=int(context.group_id), message=message)
                 else:

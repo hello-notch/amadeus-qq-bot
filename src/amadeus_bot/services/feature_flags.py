@@ -6,6 +6,7 @@ from amadeus_bot.repositories.core import CoreRepository
 
 DEFAULT_FEATURES: dict[str, bool] = {
     "chat": True,
+    "group_admin": True,
     "image_generation": True,
     "proactive_chat": True,
     "wife": True,

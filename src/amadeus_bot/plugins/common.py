@@ -27,11 +27,14 @@ async def finish_text_or_image(
     title: str,
     force_image: bool = False,
     variant: str = "default",
+    markdown: bool = False,
 ) -> None:
     threshold = int(os.getenv("AMADEUS_RENDER_TEXT_THRESHOLD", "500"))
     if force_image or len(text) >= threshold:
         try:
-            image_path = await get_container().renderer.render_text(text, title=title, variant=variant)
+            renderer = get_container().renderer
+            render = renderer.render_markdown if markdown else renderer.render_text
+            image_path = await render(text, title=title, variant=variant)
         except Exception:
             pass
         else:

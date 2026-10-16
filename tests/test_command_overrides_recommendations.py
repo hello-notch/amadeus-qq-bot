@@ -91,6 +91,7 @@ async def test_override_replies_put_action_before_command(tmp_path, monkeypatch)
     container = SimpleNamespace(
         repository=repository,
         permissions=SimpleNamespace(role_for=lambda user: PermissionLevel.SUPERUSER),
+        features=SimpleNamespace(status=lambda feature, group: SimpleNamespace(enabled=True)),
     )
     monkeypatch.setattr(command_overrides, "get_container", lambda: container)
     event = SimpleNamespace(message_type="group", group_id=10, get_user_id=lambda: "1")
@@ -106,7 +107,7 @@ async def test_override_replies_put_action_before_command(tmp_path, monkeypatch)
     import pytest
 
     for name in ("chat", "food"):
-        with pytest.raises(Finished, match=rf"已关闭/{name}（当前群）"):
+        with pytest.raises(Finished, match=rf"已将 /{name} 限为 SUPERUSER"):
             await command_overrides._set_override(event, Message(name), True, Matcher())
-        with pytest.raises(Finished, match=rf"已开启/{name}（当前群）"):
+        with pytest.raises(Finished, match=rf"已恢复 /{name} 的普通命令权限"):
             await command_overrides._set_override(event, Message(name), False, Matcher())

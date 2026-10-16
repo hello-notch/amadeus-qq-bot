@@ -16,6 +16,7 @@ PLUGIN_MODULES = (
     "amadeus_bot.plugins.utility",
     "amadeus_bot.plugins.wife",
     "amadeus_bot.plugins.group_content",
+    "amadeus_bot.plugins.group_admin",
     "amadeus_bot.plugins.memory",
     "amadeus_bot.plugins.privacy",
     "amadeus_bot.plugins.campus",

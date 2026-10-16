@@ -325,6 +325,21 @@ class CoreRepository:
         else:
             self.database.execute("DELETE FROM conversation_messages WHERE scope_key=?", (scope_key,))
 
+    def record_conversation_input(
+        self, scope_key: str, message_id: str, content: str, user_id: str, *, enrich: bool = False
+    ) -> None:
+        with self.database.connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO conversation_messages"
+                "(scope_key, role, content, user_id, message_id) VALUES (?, 'user', ?, ?, ?)",
+                (scope_key, content, user_id, message_id),
+            )
+            if enrich:
+                connection.execute(
+                    "UPDATE conversation_messages SET content=? WHERE scope_key=? AND message_id=?",
+                    (content, scope_key, message_id),
+                )
+
     def recent_conversation(self, scope_key: str, limit: int = 12) -> list[dict[str, str]]:
         rows = self.database.fetch_all(
             """
