@@ -39,7 +39,7 @@ class ThinkingReaction:
         self.active = False
 
     async def start(self) -> None:
-        if self.message_id is None:
+        if self.message_id is None or self.active:
             return
         # Mark before awaiting so cancellation during the API call still attempts cleanup.
         self.active = True

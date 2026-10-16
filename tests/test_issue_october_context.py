@@ -301,9 +301,42 @@ async def test_thinking_api_failure_is_nonfatal_and_cleanup_is_idempotent():
     bot.call_api = AsyncMock(side_effect=RuntimeError("adapter unavailable"))
     thinking = ThinkingReaction(bot, "42")
     await thinking.start()
+    await thinking.start()
     await thinking.clear()
     await thinking.clear()
     assert bot.call_api.await_count == 2
+
+
+async def test_attachment_lookup_precedes_thinking_but_vision_starts_it(tmp_path, monkeypatch):
+    nonebot.init()
+    from amadeus_bot.plugins import chat
+
+    timeline = []
+    container = make_container(tmp_path)
+    container.repository.get_media_description = Mock(return_value=None)
+    container.repository.save_media_description = Mock()
+    bot = Bot(timeline)
+
+    async def lookup(**_kwargs):
+        timeline.append("lookup")
+        return {"message": [{"type": "image", "data": {"url": "https://invalid.test/test.png"}}]}
+
+    async def vision(*_args, **_kwargs):
+        timeline.append("vision")
+        return AIResponse(content="测试图片", provider="fake", model="fake")
+
+    bot.get_msg = lookup
+    container.ai = SimpleNamespace(complete=vision)
+    current = event()
+    current.reply = SimpleNamespace(message_id=99)
+    thinking = ThinkingReaction(bot, "1")
+    await chat._enrich_input(container, bot, current, "看图片", "12345", "10001", before_model=thinking.start)
+    await thinking.start()
+    await thinking.clear()
+    assert timeline[0] == "lookup"
+    assert timeline[1] == ("set_msg_emoji_like", {"message_id": 1, "emoji_id": 181, "set": True})
+    assert timeline[2] == "vision"
+    assert timeline[3] == ("set_msg_emoji_like", {"message_id": 1, "emoji_id": 181, "set": False})
 
 
 def test_runtime_console_can_write_unicode_when_redirected(monkeypatch):

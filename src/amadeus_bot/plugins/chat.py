@@ -339,8 +339,10 @@ async def _respond_locked(matcher, bot: Bot, event, text: str) -> None:
         )
     thinking = ThinkingReaction(bot, str(event.message_id))
     try:
+        enriched = await _enrich_input(
+            container, bot, event, text, group_id, user_id, before_model=thinking.start
+        )
         await thinking.start()
-        enriched = await _enrich_input(container, bot, event, text, group_id, user_id)
         record_inbound(container, event, enriched=enriched)
         recent = container.repository.recent_conversation(scope_key, limit=24)
         messages.extend(recent)
@@ -505,7 +507,9 @@ def _load_persona() -> str:
     return "\n\n".join(parts)
 
 
-async def _enrich_input(container, bot: Bot, event, text: str, group_id: str | None, user_id: str) -> str:
+async def _enrich_input(
+    container, bot: Bot, event, text: str, group_id: str | None, user_id: str, *, before_model=None
+) -> str:
     additions: list[str] = []
     message = event.get_message()
     reply_id = reply_message_id(event)
@@ -545,6 +549,8 @@ async def _enrich_input(container, bot: Bot, event, text: str, group_id: str | N
             description = container.repository.get_media_description(digest)
             if description is None:
                 try:
+                    if before_model is not None:
+                        await before_model()
                     result = await container.ai.complete(
                         AITask.VISION,
                         [
