@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from amadeus_bot.repositories.core import CoreRepository
 from amadeus_bot.repositories.database import CoreDatabase
 from amadeus_bot.repositories.user_data import UserDataRepository
@@ -150,6 +152,38 @@ async def test_group_admin_tool_returns_bot_permission_error_without_write(tmp_p
     result = json.loads(await tools.execute("group_card", {"target_user_id": "30", "card": "test"}, context))
     assert result["success"] is False
     assert "机器人不是" in result["error"]
+    assert bot.calls == []
+
+
+@pytest.mark.parametrize(
+    "tool,arguments,success",
+    [
+        ("group_card", {"target_user_id": "30", "card": "自己的名片"}, True),
+        ("group_ban", {"target_user_id": "30", "duration": 60}, True),
+        ("group_card", {"target_user_id": "20", "card": "他人的名片"}, False),
+        ("group_ban", {"target_user_id": "20", "duration": 60}, False),
+        ("group_ban", {"target_user_id": "30", "duration": 0}, False),
+    ],
+)
+async def test_group_admin_tool_member_can_only_modify_self(tmp_path, tool, arguments, success):
+    tools = make_tools(tmp_path)
+    bot = FakeBot()
+    bot.get_group_member_info = AsyncMock(
+        side_effect=lambda **kwargs: {
+            "user_id": kwargs["user_id"],
+            "role": "admin" if kwargs["user_id"] == 999 else "member",
+        }
+    )
+    context = ToolExecutionContext.for_requester("30", "1", bot=bot)
+    result = json.loads(await tools.execute(tool, arguments, context))
+    assert result["success"] is success
+    assert bool(bot.calls) is success
+    if success:
+        assert bot.calls[0][1]["user_id"] == 30
+    bot.calls.clear()
+    tools.repository.set_command_override("1", "groupcard" if tool == "group_card" else "mute", True, "999")
+    restricted = json.loads(await tools.execute(tool, arguments, context))
+    assert restricted["success"] is False
     assert bot.calls == []
 
 

@@ -126,7 +126,7 @@ class AIService:
                     GeminiProvider if provider_config.api_mode == "gemini" else OpenAICompatibleProvider
                 )
                 self.providers[name] = (
-                    OpenAICompatibleProvider(provider_config, credential, timeout_seconds=180.0)
+                    OpenAICompatibleProvider(provider_config, credential, timeout_seconds=300.0)
                     if provider_config.api_mode == "images"
                     else provider_class(provider_config, credential)
                 )

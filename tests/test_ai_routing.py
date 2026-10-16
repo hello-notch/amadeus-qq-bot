@@ -312,6 +312,36 @@ async def test_ai_service_switches_and_persists_active_model(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_image_route_sends_request_with_five_minute_timeout(tmp_path: Path) -> None:
+    catalog = AIRouteCatalog.load(ROUTES_PATH)
+    database = CoreDatabase(tmp_path / "core.sqlite3")
+    database.initialize()
+    credentials = {
+        config.credential_host: ApiCredential(f"https://{config.credential_host}", "test-key")
+        for config in catalog.providers.values()
+    }
+    service = AIService(catalog, credentials, CoreRepository(database))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/images/generations")
+        assert request.extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"), 300.0)
+        return httpx.Response(200, json={"data": [{"b64_json": "dGVzdA=="}]})
+
+    try:
+        provider = service.providers["images"]
+        assert provider._client.timeout.read == 300.0
+        assert service.providers["gemini"]._client.timeout.read == 180.0
+        assert service.providers["deepseek"]._client.timeout.read == 45.0
+        timeout = provider._client.timeout
+        await provider._client.aclose()
+        provider._client = httpx.AsyncClient(timeout=timeout, transport=httpx.MockTransport(handler))
+        result = await service.complete(AITask.IMAGE_GENERATION, [{"role": "user", "content": "test image"}])
+        assert result.images == (b"test",)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_ai_service_uses_active_model_before_task_fallback(tmp_path: Path) -> None:
     catalog = AIRouteCatalog.load(ROUTES_PATH)
     database = CoreDatabase(tmp_path / "core.sqlite3")

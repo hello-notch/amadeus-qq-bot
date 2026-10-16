@@ -239,6 +239,44 @@ async def test_group_admin_errors_are_results_and_validation_is_strict(tmp_path)
     )["success"]
 
 
+@pytest.mark.parametrize(
+    "action,value,bot_role,actor_role,success",
+    [
+        ("group_card", "自己的新名片", "admin", "member", True),
+        ("group_card", "", "admin", "member", True),
+        ("group_ban", 1, "admin", "member", True),
+        ("group_ban", 30 * 86400, "admin", "member", True),
+        ("group_ban", 0, "admin", "member", False),
+        ("group_ban", -1, "admin", "member", False),
+        ("group_ban", 30 * 86400 + 1, "admin", "member", False),
+        ("group_card", "自己的新名片", "member", "member", False),
+        ("group_ban", 60, "member", "member", False),
+        ("group_card", "自己的新名片", "admin", "unknown", False),
+    ],
+)
+async def test_group_member_self_service_checks_before_write(
+    tmp_path, action, value, bot_role, actor_role, success
+):
+    container = make_container(tmp_path)
+    bot = Bot(bot_role=bot_role, actor_role=actor_role)
+    result = await GroupAdminService(container.features).execute(
+        action, bot=bot, group_id="12345", actor="10001", target="10001", value=value
+    )
+    assert result["success"] is success
+    assert bool(bot.timeline) is success
+    if success:
+        assert bot.timeline == [
+            (
+                "set_group_card" if action == "group_card" else "set_group_ban",
+                {
+                    "group_id": 12345,
+                    "user_id": 10001,
+                    "card" if action == "group_card" else "duration": value,
+                },
+            )
+        ]
+
+
 async def test_markdown_renders_formatting_and_blocks_all_remote_images(tmp_path, monkeypatch):
     renderer = RenderService(tmp_path)
     capture = AsyncMock(return_value=tmp_path / "x.png")

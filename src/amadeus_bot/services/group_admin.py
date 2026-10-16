@@ -37,7 +37,10 @@ class GroupAdminService:
             if bot_role not in {"owner", "admin"}:
                 return {"success": False, "error": "机器人不是本群管理员，无法执行群管理"}
             if actor_role not in {"owner", "admin"}:
-                return {"success": False, "error": "请求者不是本群管理员，无权执行群管理"}
+                if actor_role != "member" or actor != target:
+                    return {"success": False, "error": "请求者不是本群管理员，只能修改自己的群名片或禁言自己"}
+                if action == "group_ban" and value == 0:
+                    return {"success": False, "error": "解除禁言需要本群管理权限，不能自行解除禁言"}
             if target == str(bot.self_id) or target_role == "owner":
                 return {"success": False, "error": "不能管理机器人自身或群主"}
             if target_role not in {"member", "admin"}:
