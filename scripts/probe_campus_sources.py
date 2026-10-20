@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
@@ -16,7 +15,6 @@ import httpx
 from amadeus_bot.repositories.core import CoreRepository
 from amadeus_bot.repositories.database import CoreDatabase
 from amadeus_bot.services.campus import (
-    ActivitySource,
     PortalSource,
     decode_portal_html,
     load_cookie_header_file,
@@ -85,45 +83,8 @@ async def probe_jwgl() -> dict:
     }
 
 
-async def probe_activity() -> dict:
-    token_path = SECRETS / "activity-token.txt"
-    if not token_path.is_file():
-        return {"configured": False, "status": "token_missing"}
-    token = token_path.read_text(encoding="utf-8").strip()
-    url = "https://dekt.bupt.edu.cn/api/v1/activity"
-    params = {
-        "college_id": "0",
-        "grade": "0",
-        "class_id": "0",
-        "role_id": "0",
-        "page": "1",
-        "page_size": "50",
-    }
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(
-            url,
-            params=params,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-    result = {
-        "status": response.status_code,
-        "final_url": safe_url(str(response.url)),
-        "content_type": response.headers.get("content-type", "").split(";", 1)[0],
-    }
-    if response.headers.get("content-type", "").startswith("application/json"):
-        payload = response.json()
-        result["top_level_keys"] = list(payload) if isinstance(payload, dict) else []
-        data = payload.get("data") if isinstance(payload, dict) else payload
-        result["items"] = len(data) if isinstance(data, list) else None
-    elif response.status_code >= 400:
-        result["error_kind"] = "authentication" if response.status_code in {401, 403} else "http"
-    return result
-
-
 async def probe_service_layer() -> dict:
     os.environ["AMADEUS_PORTAL_COOKIE_FILE"] = str(SECRETS / "portal-cookie.txt")
-    os.environ["AMADEUS_ACTIVITY_TOKEN_FILE"] = str(SECRETS / "activity-token.txt")
-    os.environ["AMADEUS_ACTIVITY_LIST_ENDPOINT"] = "/api/v1/activity"
     with tempfile.TemporaryDirectory(prefix="amadeus-campus-probe-") as directory:
         database = CoreDatabase(Path(directory) / "core.sqlite3")
         database.initialize()
@@ -133,51 +94,20 @@ async def probe_service_layer() -> dict:
             "portal_refresh": portal_result,
             "portal_health": repository.get_source_health("portal"),
         }
-        try:
-            result["activity_refresh"] = await ActivitySource(repository).refresh()
-            result["activity_health"] = repository.get_source_health("activity")
-        except Exception as exc:
-            result["activity_error"] = type(exc).__name__
         return result
-
-
-async def probe_activity_service() -> dict:
-    os.environ["AMADEUS_ACTIVITY_TOKEN_FILE"] = str(SECRETS / "activity-token.txt")
-    os.environ["AMADEUS_ACTIVITY_LIST_ENDPOINT"] = "/api/v1/activity"
-    with tempfile.TemporaryDirectory(prefix="amadeus-activity-probe-") as directory:
-        database = CoreDatabase(Path(directory) / "core.sqlite3")
-        database.initialize()
-        repository = CoreRepository(database)
-        refresh = await ActivitySource(repository).refresh()
-        return {
-            "activity_refresh": refresh,
-            "activity_health": repository.get_source_health("activity"),
-        }
 
 
 async def main() -> None:
     load_project_env()
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--activity-only", action="store_true")
-    options = parser.parse_args()
-    if options.activity_only:
-        try:
-            result = await probe_activity_service()
-        except Exception as exc:
-            result = {"error": f"{type(exc).__name__}: {exc}"}
-        print(json.dumps({"activity_service": result}, ensure_ascii=False, indent=2))
-        return
-
     results = {}
     for name, probe in (
         ("portal", probe_portal),
         ("jwgl", probe_jwgl),
-        ("activity", probe_activity),
         ("service_layer", probe_service_layer),
     ):
         try:
             results[name] = await probe()
-        except Exception as exc:  # Probe must report all three sources.
+        except Exception as exc:  # Probe must report all remaining sources.
             results[name] = {"error": f"{type(exc).__name__}: {exc}"}
     print(json.dumps(results, ensure_ascii=False, indent=2))
 

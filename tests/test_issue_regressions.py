@@ -24,8 +24,8 @@ def test_single_segment_get_msg_payload_is_accepted() -> None:
     assert message[0].type == "file"
 
 
-def test_activity_feature_is_enabled_by_default() -> None:
-    assert DEFAULT_FEATURES["activity"] is True
+def test_retired_activity_feature_is_not_registered() -> None:
+    assert "activity" not in DEFAULT_FEATURES
     assert DEFAULT_FEATURES["proactive_chat"] is True
 
 

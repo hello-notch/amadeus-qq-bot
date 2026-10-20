@@ -86,7 +86,8 @@ def test_simulator_environment_is_isolated(tmp_path: Path, monkeypatch: pytest.M
     assert env["AMADEUS_PASSWORD_FILE"] == str(root.resolve() / "missing-password")
     assert env["AMADEUS_API_KEY_FILE"] == str(root.resolve() / "missing-api-key")
     assert env["AMADEUS_JWGL_COOKIE_FILE"] == str(project / "secrets" / "jwgl-session")
-    assert env["AMADEUS_ACTIVITY_LIST_ENDPOINT"] == "/api/v1/test-list"
+    assert "AMADEUS_ACTIVITY_LIST_ENDPOINT" not in env
+    assert "AMADEUS_ACTIVITY_TOKEN_FILE" not in env
     assert env["ONEBOT_ACCESS_TOKEN"] == ""
     assert env["AMADEUS_SIMULATOR_ROOT"] == str(root.resolve())
     monkeypatch.setenv("SIMULATOR_ENABLE_AI", "true")
@@ -118,26 +119,16 @@ async def test_simulator_campus_sources_can_query_without_renewing_sessions(
         calls.append("portal")
         return 1, 1
 
-    async def activity_once(self, endpoint, token):
-        calls.append("activity")
-        assert endpoint == "/api/v1/activity"
-        assert token == "test-token"
-        return 1, 1
-
     async def jwgl_once(self, class_number, term):
         calls.append("jwgl")
         assert class_number == "12345"
         return class_number, [{"name": "测试课"}]
 
     monkeypatch.setattr(campus.PortalSource, "_refresh_once", portal_once)
-    monkeypatch.setattr(campus.ActivitySource, "_refresh_once", activity_once)
-    monkeypatch.setattr(campus, "_load_secret_file", lambda path: "test-token")
     monkeypatch.setattr(jwgl.JwglSource, "_query_class_once", jwgl_once)
-    monkeypatch.setenv("AMADEUS_ACTIVITY_LIST_ENDPOINT", "/api/v1/activity")
     assert await campus.PortalSource(None).refresh() == (1, 1)
-    assert await campus.ActivitySource(None).refresh() == (1, 1)
     assert (await jwgl.JwglSource().query_class("12345"))[0] == "12345"
-    assert calls == ["portal", "activity", "jwgl"]
+    assert calls == ["portal", "jwgl"]
 
     async def expired(self):
         raise CampusSessionExpired("expired")

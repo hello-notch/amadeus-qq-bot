@@ -29,6 +29,15 @@ class CoreDatabase:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_message "
                 "ON conversation_messages(scope_key, message_id) WHERE message_id IS NOT NULL"
             )
+            # Remove retired campus data, including records restored from older backups.
+            for table in ("subscriptions", "source_items", "source_health"):
+                connection.execute(f"DELETE FROM {table} WHERE source = ?", ("activity",))
+            connection.execute("DELETE FROM feature_flags WHERE feature = ?", ("activity",))
+            connection.execute("DELETE FROM command_overrides WHERE command = ?", ("activity",))
+            connection.execute(
+                "DELETE FROM scheduler_deliveries WHERE delivery_key LIKE ?", ("campus:activity:%",)
+            )
+            connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (2)")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:

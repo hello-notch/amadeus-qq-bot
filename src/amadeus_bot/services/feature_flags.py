@@ -14,7 +14,6 @@ DEFAULT_FEATURES: dict[str, bool] = {
     "stick": True,
     "poke": True,
     "portal": True,
-    "activity": True,
     "stats": True,
     "summary": True,
     "quotes": True,

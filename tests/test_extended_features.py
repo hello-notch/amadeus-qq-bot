@@ -8,16 +8,11 @@ import pytest
 
 from amadeus_bot.repositories.group_data import GroupDataRepository
 from amadeus_bot.repositories.user_data import UserDataRepository
-from amadeus_bot.services import campus, campus_auth
 from amadeus_bot.services.analytics import AnalyticsService
 from amadeus_bot.services.campus import (
-    ActivitySource,
-    activity_from_mapping,
     decode_portal_html,
-    format_activity_time,
     format_source_timestamp,
     load_cookie_header_file,
-    normalize_activity_payload,
     parse_portal_list,
     portal_page_urls,
 )
@@ -278,7 +273,7 @@ def test_existing_course_database_migrates_selection_state(tmp_path: Path) -> No
     assert [course.name for course in service.list("100")] == ["原课"]
 
 
-def test_campus_parsers_accept_portal_and_activity_shapes() -> None:
+def test_campus_parser_accepts_portal_shape() -> None:
     html = (
         '<a href="xntz_content.jsp?urltype=news.NewsContentUrl&amp;wbnewsid=123">校内通知 A</a>'
         "<span>2026-08-28</span>"
@@ -286,8 +281,6 @@ def test_campus_parsers_accept_portal_and_activity_shapes() -> None:
     portal = parse_portal_list(html, "http://my.bupt.edu.cn/")
     assert portal[0].item_id == "123"
     assert portal[0].published_at == "2026-08-28"
-    activity = normalize_activity_payload({"data": [{"act_id": 7, "act_name": "讲座", "location": "西土城"}]})
-    assert activity[0] == activity_from_mapping({"act_id": 7, "act_name": "讲座", "location": "西土城"})
 
 
 def test_portal_department_and_pagination_are_extracted() -> None:
@@ -302,38 +295,6 @@ def test_portal_department_and_pagination_are_extracted() -> None:
     assert portal_page_urls(html, base) == [
         "http://my.bupt.edu.cn/list.jsp?wbtreeid=1154&urltype=tree.TreeTempUrl&a1154p=2"
     ]
-
-
-def test_activity_business_error_is_not_empty_result() -> None:
-    with pytest.raises(RuntimeError, match="业务错误"):
-        normalize_activity_payload({"status": 401, "data": []})
-    with pytest.raises(RuntimeError, match="形状"):
-        normalize_activity_payload({"message": "login required"})
-    assert normalize_activity_payload({"status": 0, "data": []}) == []
-
-
-def test_activity_student_fields_and_source_timestamp() -> None:
-    row = activity_from_mapping(
-        {
-            "id": 3,
-            "name": "讲座",
-            "activity_start_time": "2026-09-26 14:00:00",
-            "area": 1,
-            "demands": 3,
-            "attend_count": 20,
-            "attend_limit": 20,
-        }
-    )
-    assert row.published_at == "2026-09-26 14:00:00"
-    assert row.metadata["campus"] == "沙河校区"
-    assert "人数已满" in row.metadata["status"]
-    assert format_source_timestamp("2026-09-26 10:06:25") == "2026-09-26 18:06 北京时间"
-    assert format_activity_time("2026-09-25T00:00:00Z") == "2026-09-25 08:00"
-    assert format_activity_time("2026-09-25 08:00:00") == "2026-09-25 08:00"
-    assert (
-        activity_from_mapping({"id": 4, "name": "活动", "area": 1, "location": "教学楼"}).metadata["campus"]
-        == "沙河校区"
-    )
 
 
 def test_portal_decoder_falls_back_to_gb18030() -> None:
@@ -389,280 +350,6 @@ async def test_jwgl_keepalive_preserves_duplicate_cookie_names(
     await source.keepalive()
 
 
-@pytest.mark.asyncio
-async def test_activity_refresh_accepts_empty_holiday_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    token_file = tmp_path / "activity-token.txt"
-    token_file.write_text("test-token", encoding="utf-8")
-    monkeypatch.setenv("AMADEUS_ACTIVITY_TOKEN_FILE", str(token_file))
-    monkeypatch.setenv("AMADEUS_ACTIVITY_LIST_ENDPOINT", "/api/v1/activity")
-
-    class FakeResponse:
-        status_code = 200
-        headers: dict[str, str] = {}
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return {"status": 0, "data": [], "digest": [], "error": None}
-
-    class FakeClient:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-        async def get(self, endpoint: str, **kwargs):
-            assert endpoint == "/api/v1/activity"
-            assert kwargs["params"] == {
-                "college_id": "0",
-                "grade": "0",
-                "class_id": "0",
-                "role_id": "0",
-                "page": "1",
-                "page_size": "50",
-            }
-            assert kwargs["headers"]["Authorization"] == "Bearer test-token"
-            return FakeResponse()
-
-    class FakeRepository:
-        def set_source_health(self, source: str, **values) -> None:
-            assert source == "activity"
-            assert values == {"success": True, "item_count": 0}
-
-        def upsert_source_item(self, _source: str, _item: dict) -> bool:
-            raise AssertionError("空列表不应写入项目")
-
-        def prune_source_items(self, source: str, item_ids: list[str]) -> int:
-            assert source == "activity"
-            assert item_ids == []
-            return 0
-
-    monkeypatch.setattr(campus.httpx, "AsyncClient", FakeClient)
-    assert await ActivitySource(FakeRepository()).refresh() == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_activity_refresh_enriches_full_registration_from_readonly_detail(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    token_file = tmp_path / "activity-token.txt"
-    token_file.write_text("test-token", encoding="utf-8")
-    monkeypatch.setenv("AMADEUS_ACTIVITY_TOKEN_FILE", str(token_file))
-    monkeypatch.setenv("AMADEUS_ACTIVITY_LIST_ENDPOINT", "/api/v1/activity")
-    seen_paths: list[str] = []
-    stored: list[dict] = []
-
-    class FakeResponse:
-        status_code = 200
-        headers: dict[str, str] = {}
-
-        def __init__(self, data) -> None:
-            self.data = data
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self):
-            return {"data": self.data}
-
-    class FakeClient:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-        async def get(self, endpoint: str, **kwargs):
-            seen_paths.append(endpoint)
-            assert kwargs["headers"]["Authorization"] == "Bearer test-token"
-            if endpoint.endswith("/7"):
-                return FakeResponse({"id": 7, "attend_count": 20, "attend_limit": 20})
-            return FakeResponse(
-                [
-                    {
-                        "id": 7,
-                        "name": "讲座",
-                        "demands": 1,
-                        "attend_limit": 20,
-                        "activity_start_time": "2026-09-26 14:00:00",
-                    }
-                ]
-            )
-
-    class FakeRepository:
-        def upsert_source_item(self, source: str, item: dict) -> bool:
-            assert source == "activity"
-            stored.append(item)
-            return True
-
-        def prune_source_items(self, source: str, ids: list[str]) -> int:
-            assert source == "activity" and ids == ["7"]
-            return 0
-
-        def set_source_health(self, source: str, **values) -> None:
-            assert source == "activity" and values["item_count"] == 1
-
-    monkeypatch.setattr(campus.httpx, "AsyncClient", FakeClient)
-    assert await ActivitySource(FakeRepository()).refresh() == (1, 1)
-    assert seen_paths == ["/api/v1/activity", "/api/v1/activity/7"]
-    assert "人数已满" in stored[0]["metadata"]["status"]
-
-
-@pytest.mark.asyncio
-async def test_activity_refresh_renews_expired_token_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    token_file = tmp_path / "activity-token.txt"
-    token_file.write_text("expired-token", encoding="utf-8")
-    monkeypatch.setenv("AMADEUS_ACTIVITY_TOKEN_FILE", str(token_file))
-    monkeypatch.setenv("AMADEUS_ACTIVITY_LIST_ENDPOINT", "/api/v1/activity")
-    used_tokens: list[str] = []
-
-    class FakeResponse:
-        def __init__(self, status_code: int) -> None:
-            self.status_code = status_code
-            self.headers: dict[str, str] = {}
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return {"status": 0, "data": []}
-
-    class FakeClient:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-        async def get(self, _endpoint: str, **kwargs):
-            token = kwargs["headers"]["Authorization"].removeprefix("Bearer ")
-            used_tokens.append(token)
-            return FakeResponse(401 if token == "expired-token" else 200)
-
-    class FakeAuthenticator:
-        available = True
-
-        async def login_activity(self) -> None:
-            token_file.write_text("header.payload.signature", encoding="utf-8")
-
-    class FakeRepository:
-        def set_source_health(self, source: str, **values) -> None:
-            assert source == "activity"
-            assert values == {"success": True, "item_count": 0}
-
-        def upsert_source_item(self, _source: str, _item: dict) -> bool:
-            raise AssertionError("空列表不应写入项目")
-
-        def prune_source_items(self, source: str, item_ids: list[str]) -> int:
-            assert source == "activity"
-            assert item_ids == []
-            return 0
-
-    monkeypatch.setattr(campus.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(campus, "CampusAuthenticator", FakeAuthenticator)
-    assert await ActivitySource(FakeRepository()).refresh() == (0, 0)
-    assert used_tokens == ["expired-token", "header.payload.signature"]
-
-
-@pytest.mark.asyncio
-async def test_activity_login_saves_returned_jwt_atomically(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    password_file = tmp_path / "password.txt"
-    password_file.write_text("student\nsecret\n", encoding="utf-8")
-    token_file = tmp_path / "activity-token.txt"
-    monkeypatch.setenv("AMADEUS_PASSWORD_FILE", str(password_file))
-    monkeypatch.setenv("AMADEUS_ACTIVITY_TOKEN_FILE", str(token_file))
-
-    class FakeResponse:
-        status_code = 200
-        headers: dict[str, str] = {}
-
-        def json(self) -> dict:
-            return {"data": "header.payload.signature"}
-
-    class FakeClient:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-        async def post(self, path: str, **kwargs):
-            assert path == campus_auth.ACTIVITY_LOGIN_PATH
-            assert kwargs["data"] == {
-                "username": "student",
-                "password": "secret",
-                "code": "",
-                "captcha": "",
-            }
-            return FakeResponse()
-
-    monkeypatch.setattr(campus_auth.httpx, "AsyncClient", FakeClient)
-    await campus_auth.CampusAuthenticator().login_activity()
-    assert token_file.read_text(encoding="utf-8") == "header.payload.signature"
-    assert not token_file.with_suffix(".txt.tmp").exists()
-
-
-@pytest.mark.asyncio
-async def test_activity_login_uses_browser_when_site_requires_verification(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    password_file = tmp_path / "password.txt"
-    password_file.write_text("student\nsecret\n", encoding="utf-8")
-    token_file = tmp_path / "activity-token.txt"
-    monkeypatch.setenv("AMADEUS_PASSWORD_FILE", str(password_file))
-    monkeypatch.setenv("AMADEUS_ACTIVITY_TOKEN_FILE", str(token_file))
-
-    class FakeResponse:
-        status_code = 200
-        headers = {"x-real-status": "419"}
-
-    class FakeClient:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-        async def post(self, _path: str, **_kwargs):
-            return FakeResponse()
-
-    async def fake_browser_login(_self: campus_auth.CampusAuthenticator, account: str, password: str) -> str:
-        assert (account, password) == ("student", "secret")
-        return "newheader.newpayload.newsignature"
-
-    monkeypatch.setattr(campus_auth.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(
-        campus_auth.CampusAuthenticator,
-        "_login_activity_browser",
-        fake_browser_login,
-    )
-    await campus_auth.CampusAuthenticator().login_activity()
-    assert token_file.read_text(encoding="utf-8") == "newheader.newpayload.newsignature"
-
-
 def test_analytics_counts_deterministic_segments(tmp_path: Path) -> None:
     now = datetime.now().astimezone()
     directory = tmp_path / "logs" / "messages" / "1"
@@ -704,3 +391,7 @@ def test_ddl_edit_resets_default_reminder_and_due_scan(tmp_path: Path) -> None:
     assert updated is not None
     assert updated.content == "数学作业"
     assert updated.reminder_at_utc is not None
+
+
+def test_source_timestamp_uses_beijing_time() -> None:
+    assert format_source_timestamp("2026-09-26 10:06:25") == "2026-09-26 18:06 北京时间"

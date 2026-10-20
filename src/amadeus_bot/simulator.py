@@ -324,13 +324,7 @@ def isolated_environment(root: Path, bot_port: int) -> dict[str, str]:
             "AMADEUS_JWGL_COOKIE_FILE": credential_path(
                 "AMADEUS_JWGL_COOKIE_FILE", "secrets/jwgl-cookie.txt"
             ),
-            "AMADEUS_ACTIVITY_TOKEN_FILE": credential_path(
-                "AMADEUS_ACTIVITY_TOKEN_FILE", "secrets/activity-token.txt"
-            ),
             "AMADEUS_PASSWORD_FILE": str(root / "missing-password"),
-            "AMADEUS_ACTIVITY_LIST_ENDPOINT": configured.get(
-                "AMADEUS_ACTIVITY_LIST_ENDPOINT", "/api/v1/activity"
-            ),
             "ONEBOT_ACCESS_TOKEN": "",
             "ONEBOT_WS_URLS": "[]",
             "SUPERUSERS": f'["{USERS[0]["user_id"]}"]',

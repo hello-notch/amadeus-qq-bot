@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-import csv
 import hashlib
-import io
 import json
 import os
 import re
@@ -51,18 +48,6 @@ def format_source_timestamp(value: str | None) -> str:
         return "未知"
     instant = datetime.fromisoformat(value).replace(tzinfo=UTC)
     return instant.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M 北京时间")
-
-
-def format_activity_time(value: str | None) -> str:
-    if not value:
-        return "时间未公布"
-    try:
-        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return value
-    if instant.tzinfo is not None:
-        instant = instant.astimezone(ZoneInfo("Asia/Shanghai"))
-    return instant.strftime("%Y-%m-%d %H:%M")
 
 
 class PortalSource:
@@ -122,144 +107,6 @@ class PortalSource:
         self.repository.prune_source_items("portal", [item.item_id for item in items])
         self.repository.set_source_health("portal", success=True, item_count=len(items))
         return len(items), new_count
-
-
-class ActivitySource:
-    BASE_URL = "https://dekt.bupt.edu.cn"
-
-    def __init__(self, repository: CoreRepository) -> None:
-        self.repository = repository
-
-    async def refresh(self) -> tuple[int, int]:
-        endpoint = os.getenv("AMADEUS_ACTIVITY_LIST_ENDPOINT", "/api/v1/activity").strip()
-        if not endpoint:
-            raise RuntimeError(
-                "尚未配置只读活动列表接口；当前已确认平台使用 Bearer token，但未确认学生端列表路径"
-            )
-        if not endpoint.startswith("/api/"):
-            raise RuntimeError("活动接口必须是站内 /api/... 路径")
-
-        token_file = os.getenv("AMADEUS_ACTIVITY_TOKEN_FILE", "secrets/activity-token.txt")
-        token = _load_secret_file(token_file)
-        authenticator = CampusAuthenticator()
-        if not token:
-            if not authenticator.available:
-                raise RuntimeError("第二课堂 token 缺失，且未配置可用于自动续登的密码文件")
-            await authenticator.login_activity()
-            token = _load_secret_file(token_file)
-
-        try:
-            return await self._refresh_once(endpoint, token)
-        except CampusSessionExpired:
-            if not authenticator.available:
-                raise
-            await authenticator.login_activity()
-            refreshed_token = _load_secret_file(token_file)
-            if not refreshed_token or refreshed_token == token:
-                raise RuntimeError("第二课堂自动续登后未获得新 token") from None
-            return await self._refresh_once(endpoint, refreshed_token)
-
-    async def _refresh_once(self, endpoint: str, token: str) -> tuple[int, int]:
-        async with httpx.AsyncClient(base_url=self.BASE_URL, timeout=20.0) as client:
-            response = await client.get(
-                endpoint,
-                params=(
-                    {
-                        "college_id": "0",
-                        "grade": "0",
-                        "class_id": "0",
-                        "role_id": "0",
-                        "page": "1",
-                        "page_size": "50",
-                    }
-                    if endpoint == "/api/v1/activity"
-                    else {"act_state": 0, "page": 1, "page_size": 50}
-                ),
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            real_status = int(response.headers.get("x-real-status") or response.status_code)
-            if real_status in {401, 403}:
-                raise CampusSessionExpired("第二课堂登录已失效")
-            if real_status >= 400:
-                raise RuntimeError(f"第二课堂活动列表失败（HTTP {real_status}）")
-            response.raise_for_status()
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise RuntimeError("第二课堂活动接口返回了非 JSON 响应") from exc
-            items = normalize_activity_payload(payload)
-            if endpoint == "/api/v1/activity" and isinstance(payload, dict):
-                rows = payload.get("data")
-                if isinstance(rows, list) and len(rows) == len(items):
-                    semaphore = asyncio.Semaphore(4)
-
-                    async def enrich(row: dict, item: CampusItem) -> CampusItem:
-                        if (
-                            not str(row.get("id") or "").isdigit()
-                            or not str(row.get("demands") or "").isdigit()
-                            or not int(row["demands"]) & 1
-                            or not str(row.get("attend_limit") or "").isdigit()
-                            or int(row["attend_limit"]) <= 0
-                            or row.get("attend_count") is not None
-                        ):
-                            return item
-                        async with semaphore:
-                            try:
-                                detail_response = await client.get(
-                                    f"{endpoint}/{row['id']}",
-                                    headers={"Authorization": f"Bearer {token}"},
-                                )
-                                detail_status = int(
-                                    detail_response.headers.get("x-real-status")
-                                    or detail_response.status_code
-                                )
-                                if detail_status in {401, 403}:
-                                    raise CampusSessionExpired("第二课堂登录已失效")
-                                if detail_status >= 400:
-                                    return item
-                                envelope = detail_response.json()
-                                if (
-                                    not isinstance(envelope, dict)
-                                    or envelope.get("success") is False
-                                    or envelope.get("error") not in (None, False, "")
-                                ):
-                                    return item
-                                detail = envelope.get("data")
-                                if (
-                                    not isinstance(detail, dict)
-                                    or str(detail.get("id")) != str(row["id"])
-                                    or detail.get("attend_count") is None
-                                ):
-                                    return item
-                                return activity_from_mapping({**row, **detail})
-                            except CampusSessionExpired:
-                                raise
-                            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                                return item
-
-                    items = await asyncio.gather(
-                        *(enrich(row, item) for row, item in zip(rows, items, strict=True))
-                    )
-        return self.import_items(items)
-
-    def import_items(self, items: list[CampusItem]) -> tuple[int, int]:
-        new_count = sum(
-            self.repository.upsert_source_item("activity", item.as_repository_item()) for item in items
-        )
-        self.repository.prune_source_items("activity", [item.item_id for item in items])
-        self.repository.set_source_health("activity", success=True, item_count=len(items))
-        return len(items), new_count
-
-    def import_file(self, content: bytes, filename: str) -> tuple[int, int]:
-        if filename.lower().endswith(".json"):
-            raw = json.loads(content.decode("utf-8-sig"))
-            items = normalize_activity_payload(raw)
-        elif filename.lower().endswith(".csv"):
-            rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
-            items = [activity_from_mapping(row) for row in rows]
-        else:
-            raise ValueError("活动导入仅支持 JSON 或 CSV")
-        return self.import_items(items)
 
 
 def parse_portal_list(html_text: str, base_url: str) -> list[CampusItem]:
@@ -349,81 +196,6 @@ def decode_portal_html(content: bytes) -> str:
         return content.decode("gb18030", errors="replace")
 
 
-def normalize_activity_payload(payload) -> list[CampusItem]:
-    if isinstance(payload, dict):
-        if (
-            payload.get("success") is False
-            or payload.get("error") not in (None, False, "")
-            or str(payload.get("status", "ok")).lower() not in {"ok", "success", "200", "0"}
-            or str(payload.get("code", "0")) not in {"0", "200"}
-        ):
-            raise RuntimeError("第二课堂活动列表返回业务错误")
-        for key in ("data", "items", "list", "records", "activities", "result"):
-            value = payload.get(key)
-            if key in payload:
-                return normalize_activity_payload(value)
-    if not isinstance(payload, list):
-        raise RuntimeError("第二课堂活动列表响应形状已变化")
-    if any(not isinstance(item, dict) for item in payload):
-        raise RuntimeError("第二课堂活动列表条目形状已变化")
-    return [activity_from_mapping(item) for item in payload if isinstance(item, dict)]
-
-
-def activity_from_mapping(item: dict) -> CampusItem:
-    item_id = _first(item, "activity_id", "act_id", "id", "活动ID")
-    title = _first(item, "name", "title", "activity_name", "act_name", "活动名称")
-    if not item_id or not title:
-        raise ValueError("活动数据必须包含活动 ID 和名称")
-    published = (
-        _first(item, "activity_start_time", "start_time", "activity_time", "begin_at", "活动时间") or None
-    )
-    area = {"0": "西土城校区", "1": "沙河校区"}.get(str(item.get("area")), "")
-    campus = _first(item, "campus", "校区") or area
-    demands = item.get("demands")
-    status = _first(item, "status", "state", "状态")
-    if demands is not None and str(demands).isdigit():
-        bits = int(demands)
-        status = " · ".join(
-            (
-                "需报名" if bits & 1 else "不报名",
-                "需签到" if bits & 2 else "不签到",
-                "需签退" if bits & 4 else "不签退",
-            )
-        )
-        try:
-            if (
-                bits & 1
-                and int(item.get("attend_limit") or 0) > 0
-                and int(item.get("attend_count") or 0) >= int(item["attend_limit"])
-            ):
-                status += " · 人数已满"
-        except (TypeError, ValueError):
-            pass
-    metadata = {
-        "category": _first(item, "category", "class_name", "type", "类别"),
-        "campus": campus,
-        "location": _first(item, "location", "address", "地点"),
-        "event_end": _first(item, "activity_end_time", "end_time", "finish_at"),
-        "registration_start": _first(
-            item, "register_start_time", "registration_start_time", "signup_start_time", "报名开始"
-        ),
-        "registration_end": _first(
-            item, "register_end_time", "registration_end_time", "signup_end_time", "报名结束"
-        ),
-        "capacity": _first(item, "attend_limit", "capacity", "quota", "名额"),
-        "status": status,
-    }
-    return CampusItem(
-        str(item_id),
-        str(title),
-        str(published) if published else None,
-        str(_first(item, "organizer", "organizer_name", "department", "sponsor", "sponsor_name", "主办方")),
-        str(_first(item, "summary", "description", "简介")),
-        str(_first(item, "url", "link", "详情链接")),
-        metadata,
-    )
-
-
 def load_cookie_header_file(value: str | None) -> str:
     """Load an exact Cookie request header while accepting legacy JSON files."""
     if not value:
@@ -447,20 +219,6 @@ def load_cookie_header_file(value: str | None) -> str:
     if not all("=" in part for part in raw.split(";") if part.strip()):
         raise RuntimeError("Cookie 请求头格式无效")
     return "; ".join(part.strip() for part in raw.split(";") if part.strip())
-
-
-def _load_secret_file(value: str | None) -> str:
-    if not value:
-        return ""
-    path = Path(value).expanduser()
-    return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
-
-
-def _first(item: dict, *keys: str):
-    for key in keys:
-        if item.get(key) not in {None, ""}:
-            return item[key]
-    return ""
 
 
 def _strip_html(value: str) -> str:

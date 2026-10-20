@@ -23,8 +23,7 @@ for spec in (
         name="health",
         description="查看机器人和依赖服务状态",
         usage=(
-            "/health：查看状态；/health detail：查看详细状态；"
-            "/health source <portal/activity/jwgl>：查看数据源状态"
+            "/health：查看状态；/health detail：查看详细状态；/health source <portal/jwgl>：查看数据源状态"
         ),
         permission=PermissionLevel.EVERYONE,
         ai_callable=False,
@@ -67,7 +66,7 @@ async def handle_health(bot: Bot, event, arguments: Message = CommandArg()) -> N
         protocol_ok = False
     if not argument:
         sources = []
-        for source, label in (("portal", "信息门户"), ("activity", "第二课堂")):
+        for source, label in (("portal", "信息门户"),):
             row = container.repository.get_source_health(source)
             if row is None or not row.get("last_success_at"):
                 status = "尚未成功抓取"
@@ -85,8 +84,8 @@ async def handle_health(bot: Bot, event, arguments: Message = CommandArg()) -> N
         )
     if argument.startswith("source"):
         source = argument.removeprefix("source").strip()
-        if source not in {"portal", "activity", "jwgl"}:
-            await health_command.finish("数据源必须是 portal、activity 或 jwgl。")
+        if source not in {"portal", "jwgl"}:
+            await health_command.finish("数据源必须是 portal 或 jwgl。")
         row = container.repository.get_source_health(source)
         if row is None:
             await health_command.finish(f"{source}：尚无抓取记录。")

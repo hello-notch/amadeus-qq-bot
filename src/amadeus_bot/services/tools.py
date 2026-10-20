@@ -235,9 +235,9 @@ class AIToolService:
             ),
             _function(
                 "campus_query",
-                "查询信息门户通知或第二课堂活动缓存",
+                "查询信息门户通知缓存",
                 {
-                    "source": {"type": "string", "enum": ["portal", "activity"]},
+                    "source": {"type": "string", "enum": ["portal"]},
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                 },
@@ -245,9 +245,9 @@ class AIToolService:
             ),
             _function(
                 "campus_subscribe",
-                "开关当前请求者的信息门户或第二课堂私聊订阅",
+                "开关当前请求者的信息门户私聊订阅",
                 {
-                    "source": {"type": "string", "enum": ["portal", "activity"]},
+                    "source": {"type": "string", "enum": ["portal"]},
                     "enabled": {"type": "boolean"},
                 },
                 ["source", "enabled"],
@@ -521,12 +521,16 @@ class AIToolService:
                 return _result(bool(changed), changed=changed)
             if name == "campus_query":
                 source = str(arguments["source"])
+                if source != "portal":
+                    return _result(False, error="不支持的校园数据源")
                 rows = self.repository.query_source_items(
                     source, str(arguments.get("query") or ""), int(arguments.get("limit") or 10)
                 )
                 return _result(True, items=rows)
             if name == "campus_subscribe":
                 source = str(arguments["source"])
+                if source != "portal":
+                    return _result(False, error="不支持的校园数据源")
                 self.repository.set_subscription(
                     source, "user", context.subject_user_id, bool(arguments["enabled"]), context.requested_by
                 )

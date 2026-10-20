@@ -148,38 +148,6 @@ class RenderService:
             content, title=f"第 {week} 周课表", variant=variant, kind="timetable", html_body=html_body
         )
 
-    async def render_activities(self, activities: list[dict], *, subtitle: str, updated: str) -> Path:
-        cards = []
-        for index, item in enumerate(activities, 1):
-            status_html = ""
-            for status in item["statuses"]:
-                tone = "full" if status == "人数已满" else "need" if status.startswith("需") else "neutral"
-                status_html += f'<span class="activity-status {tone}">{html.escape(status)}</span>'
-            registration = (
-                f'<div class="registration-time">报名时间 · {html.escape(item["registration"])}</div>'
-                if item["registration"]
-                else ""
-            )
-            cards.append(
-                f'<article class="activity-entry"><span class="row-index">{index:02d}</span>'
-                f"<div><strong>{html.escape(item['title'])}</strong>"
-                f'<div class="row-meta">{html.escape(item["when"])} · '
-                f"{html.escape(item['category'])}</div>"
-                f'<div class="row-meta">{html.escape(item["place"])}</div>'
-                f'<div class="activity-statuses">{status_html}</div>{registration}</div></article>'
-            )
-        return await self._render(
-            repr((activities, subtitle, updated)),
-            title="第二课堂 · 活动",
-            variant="activity:rich",
-            kind="structured",
-            html_body=(
-                f'<div class="subtitle">{html.escape(subtitle)}</div>'
-                f"<section>{''.join(cards)}</section>"
-                f'<div class="list-footer">最近更新：{html.escape(updated)}</div>'
-            ),
-        )
-
     @staticmethod
     def _help_overview_html(content: str) -> str:
         sections: list[str] = []
@@ -366,18 +334,6 @@ h1 {{ margin: 0 0 18px; color: #245c59; font-size: 30px; }}
 .course-chip + .course-chip {{ border-top: 1px solid #99a9ae; padding-top: 8px; margin-top: 8px; }}
 .course-chip strong {{ display: block; font-size: 14px; line-height: 1.25; }}
 .course-chip small {{ display: block; color: #52666b; font-size: 11px; line-height: 1.3; margin-top: 4px; }}
-.activity-entry {{ display: grid; grid-template-columns: 55px 1fr; gap: 12px;
-  padding: 17px 15px; overflow-wrap: anywhere; }}
-.activity-entry:nth-child(odd) {{ background: #f2f7f6; }}
-.activity-entry:nth-child(even) {{ background: #f7f5ee; }}
-.activity-entry strong {{ display: block; font-size: 20px; line-height: 1.4; }}
-.activity-statuses {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }}
-.activity-status {{ display: inline-block; border: 1px solid #a7b6c1; border-radius: 4px;
-  padding: 3px 7px; color: #53656c; background: #fff; font-size: 13px; }}
-.activity-status.need {{ color: #125c92; border-color: #78a8c8; background: #e8f3fb; }}
-.activity-status.full {{ color: #9f1239; border-color: #db8da0; background: #fff0f2; }}
-.registration-time {{ margin-top: 9px; padding-left: 8px; border-left: 3px solid #a25c35;
-  color: #714426; font-size: 15px; }}
 .course-tone-1 {{ background: #fff1d8; border-color: #af7021; }}
 .course-tone-2 {{ background: #fbeaf1; border-color: #bd507e; }}
 .course-tone-3 {{ background: #e2f4f7; border-color: #158196; }}

@@ -4,7 +4,6 @@ import os
 import re
 from pathlib import Path
 
-import httpx
 from playwright.async_api import BrowserContext, Page, async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -12,8 +11,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PORTAL_LIST_URL = "http://my.bupt.edu.cn/list.jsp?urltype=tree.TreeTempUrl&wbtreeid=1154"
 JWGL_LOGIN_URL = "https://jwgl.bupt.edu.cn/jsxsd/"
 JWGL_HOME_URL = "https://jwgl.bupt.edu.cn/jsxsd/framework/xsMain_bjyddx.jsp"
-ACTIVITY_BASE_URL = "https://dekt.bupt.edu.cn"
-ACTIVITY_LOGIN_PATH = "/api/v1/auth/sessions"
 
 
 class CampusSessionExpired(RuntimeError):
@@ -116,73 +113,6 @@ class CampusAuthenticator:
             finally:
                 await browser.close()
 
-    async def login_activity(self) -> None:
-        """Refresh the Second Classroom JWT with the site's student login API."""
-        account, password = self._load_credentials()
-        async with httpx.AsyncClient(base_url=ACTIVITY_BASE_URL, timeout=20.0) as client:
-            response = await client.post(
-                ACTIVITY_LOGIN_PATH,
-                data={
-                    "username": account,
-                    "password": password,
-                    "code": "",
-                    "captcha": "",
-                },
-            )
-
-        real_status = _real_response_status(response)
-        if real_status in {419, 420}:
-            token = await self._login_activity_browser(account, password)
-        else:
-            if real_status in {401, 403}:
-                raise RuntimeError("第二课堂自动登录失败，请检查学工号和密码")
-            if real_status >= 400:
-                raise RuntimeError(f"第二课堂自动登录失败（HTTP {real_status}）")
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise RuntimeError("第二课堂登录响应不是 JSON") from exc
-            token = payload.get("data") if isinstance(payload, dict) else None
-        if not _looks_like_jwt(token):
-            raise RuntimeError("第二课堂登录响应未包含有效 token")
-
-        path = _resolve_project_path(os.getenv("AMADEUS_ACTIVITY_TOKEN_FILE", "secrets/activity-token.txt"))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(token, encoding="utf-8")
-        temporary.replace(path)
-
-    async def _login_activity_browser(self, account: str, password: str) -> str:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=self._activity_headless(),
-                args=["--disable-blink-features=AutomationControlled"],
-                ignore_default_args=["--enable-automation"],
-            )
-            try:
-                context = await browser.new_context()
-                page = await context.new_page()
-                await page.goto(ACTIVITY_BASE_URL, wait_until="domcontentloaded", timeout=30_000)
-                await page.locator('input[placeholder="学工号"]').fill(account)
-                await page.locator('input[placeholder="密码"]').fill(password)
-                await page.get_by_role("button", name="登录").click()
-                try:
-                    await page.wait_for_function(
-                        """() => {
-                            const token = localStorage.getItem('secondclass.tokenv3') || '';
-                            return token.split('.').length === 3;
-                        }""",
-                        timeout=30_000,
-                    )
-                except PlaywrightTimeoutError as exc:
-                    raise RuntimeError(
-                        "第二课堂浏览器登录未完成，可能需要人工完成验证码或检查账号密码"
-                    ) from exc
-                token = await page.evaluate("() => localStorage.getItem('secondclass.tokenv3') || ''")
-                return str(token)
-            finally:
-                await browser.close()
-
     def _load_credentials(self) -> tuple[str, str]:
         if os.getenv("AMADEUS_SIMULATOR_ROOT"):
             raise RuntimeError("模拟器不执行校园自动续登")
@@ -204,14 +134,6 @@ class CampusAuthenticator:
     @staticmethod
     def _portal_headless() -> bool:
         return os.getenv("AMADEUS_PORTAL_BROWSER_HEADLESS", "true").strip().lower() not in {
-            "0",
-            "false",
-            "no",
-        }
-
-    @staticmethod
-    def _activity_headless() -> bool:
-        return os.getenv("AMADEUS_ACTIVITY_BROWSER_HEADLESS", "true").strip().lower() not in {
             "0",
             "false",
             "no",
@@ -241,18 +163,6 @@ class CampusAuthenticator:
 def _resolve_project_path(value: str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
-
-
-def _real_response_status(response: httpx.Response) -> int:
-    value = response.headers.get("x-real-status", "").strip()
-    try:
-        return int(value) if value else response.status_code
-    except ValueError:
-        return response.status_code
-
-
-def _looks_like_jwt(value: object) -> bool:
-    return isinstance(value, str) and all(value.split(".")) and len(value.split(".")) == 3
 
 
 async def _looks_like_jwgl_login(page: Page) -> bool:

@@ -28,36 +28,14 @@ async def main() -> None:
             footer="最近更新：2026-09-26 18:06 北京时间",
             variant="layout-check",
         )
-        activity = await renderer.render_activities(
-            [
-                {
-                    "title": "智能系统与校园实践讲座",
-                    "when": "2026-09-26 18:30",
-                    "category": "学术讲座",
-                    "place": "沙河校区 · 教学楼报告厅",
-                    "statuses": ["需报名", "需签到", "需签退", "人数已满"],
-                    "registration": "2026-09-20 08:00 至 2026-09-26 12:00",
-                },
-                {
-                    "title": "青年志愿服务活动",
-                    "when": "2026-09-28 09:00",
-                    "category": "志愿服务",
-                    "place": "西土城校区 · 体育馆",
-                    "statuses": ["不报名", "不签到", "不签退"],
-                    "registration": "",
-                },
-            ],
-            subtitle="最近 2 条",
-            updated="2026-09-26 18:06 北京时间",
-        )
         help_image = await renderer.render_text(
             "Amadeus Bot · 可用命令\n\n【校园服务】\n/portal  🔧\n"
-            "  查询通知｜EVERYONE\n/activity  🔧\n  查询第二课堂｜EVERYONE\n\n"
+            "  查询通知｜EVERYONE\n\n"
             "🔧 表示该命令的部分能力可由 AI 工具调用。",
             title="Amadeus Bot 帮助",
             variant="overview:layout-check",
         )
-        for image in (timetable, portal, activity, help_image):
+        for image in (timetable, portal, help_image):
             print(image.resolve())
     finally:
         await renderer.close()

@@ -110,40 +110,6 @@ async def test_timetable_overlapping_manual_courses_share_one_spanning_cell(
     assert captured["html"].count("课程乙") == 1
 
 
-@pytest.mark.asyncio
-async def test_activity_render_highlights_status_and_escapes_fields(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    renderer = RenderService(tmp_path)
-    captured = {}
-
-    async def capture(content, *, title, variant, kind, html_body):
-        captured["html"] = html_body
-        return tmp_path / "sample.png"
-
-    monkeypatch.setattr(renderer, "_render", capture)
-    await renderer.render_activities(
-        [
-            {
-                "title": "<讲座>",
-                "when": "周一",
-                "category": "讲座",
-                "place": "沙河校区 · 体育馆",
-                "statuses": ["需报名", "需签到", "人数已满"],
-                "registration": "09:00 至 12:00",
-            }
-        ],
-        subtitle="最近 1 条",
-        updated="2026-09-26 18:06 北京时间",
-    )
-    body = captured["html"]
-    assert "&lt;讲座&gt;" in body
-    assert "activity-status full" in body
-    assert "activity-status need" in body
-    assert "报名时间 · 09:00 至 12:00" in body
-    assert body.count("体育馆") == 1
-
-
 def test_message_normalizer_preserves_segments() -> None:
     record = MessageNormalizer.from_onebot_event(FakeEvent())
     assert record.scene == "group"

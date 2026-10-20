@@ -10,7 +10,7 @@ from nonebot import get_bots, get_driver
 from nonebot.log import logger
 
 from amadeus_bot.bootstrap import get_container
-from amadeus_bot.services.campus import ActivitySource, PortalSource
+from amadeus_bot.services.campus import PortalSource
 from amadeus_bot.services.ddl import format_ddl
 from amadeus_bot.services.jwgl import JwglSource
 
@@ -107,7 +107,6 @@ async def refresh_campus_sources_if_due() -> None:
     container = get_container()
     sources = (
         ("portal", PortalSource(container.repository).refresh),
-        ("activity", ActivitySource(container.repository).refresh),
         ("jwgl", JwglSource().keepalive),
     )
     for name, refresh in sources:
@@ -145,7 +144,7 @@ async def dispatch_daily_subscriptions() -> int:
         return 0
     container = get_container()
     sent = 0
-    for row in container.repository.list_subscriptions():
+    for row in container.repository.list_subscriptions("portal"):
         if not row["enabled"]:
             continue
         key = f"campus:{row['source']}:{row['scope_type']}:{row['scope_id']}:{now.date()}"

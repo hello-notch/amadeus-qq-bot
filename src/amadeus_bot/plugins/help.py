@@ -36,7 +36,7 @@ HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("推荐", ("nowdo", "food", "music")),
     ("群聊内容", ("stats", "summary", "quote")),
     ("群友 wife", ("wife", "changewife", "showwife", "marry")),
-    ("校园服务", ("portal", "activity")),
+    ("校园服务", ("portal",)),
     ("互动", ("stick", "poke")),
     ("群管理（需群管理员）", ("groupcard", "mute")),
     (
