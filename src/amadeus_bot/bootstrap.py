@@ -14,7 +14,6 @@ from amadeus_bot.services.ai_router import AIRouteCatalog, AIService
 from amadeus_bot.services.courses import CourseService
 from amadeus_bot.services.ddl import DDLService
 from amadeus_bot.services.feature_flags import FeatureFlagService
-from amadeus_bot.services.image_generation import ImageGenerationService
 from amadeus_bot.services.memory import MemoryService
 from amadeus_bot.services.permission import PermissionService
 from amadeus_bot.services.recommendation_seeds import seed_recommendations
@@ -38,7 +37,6 @@ class ServiceContainer:
     memory: MemoryService
     ai_tools: AIToolService
     activity_log: ActivityLogService
-    image_generation: ImageGenerationService
 
     async def close(self) -> None:
         await self.ai.close()
@@ -65,7 +63,6 @@ def build_container(superusers: set[str] | None = None, paths: AppPaths | None =
     catalog = AIRouteCatalog.load(app_paths.ai_routes_file)
     credentials = CredentialStore.load(app_paths.api_key_file)
     ai = AIService(catalog, credentials, repository)
-    image_generation = ImageGenerationService(ai, app_paths.data / "cache" / "generated")
     container = ServiceContainer(
         paths=app_paths,
         database=database,
@@ -88,10 +85,8 @@ def build_container(superusers: set[str] | None = None, paths: AppPaths | None =
             courses,
             app_paths.logs,
             activity_log,
-            image_generation=image_generation,
         ),
         activity_log=activity_log,
-        image_generation=image_generation,
     )
     return container
 

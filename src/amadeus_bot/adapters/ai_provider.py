@@ -47,6 +47,7 @@ class CredentialStore:
             return {}
         credentials: dict[str, ApiCredential] = {}
         pending_key: str | None = None
+        pending_provider: str | None = None
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#"):
@@ -56,13 +57,23 @@ class CredentialStore:
                 continue
             normalized_label = match.group(1).strip().lower()
             value = match.group(2).strip()
-            if normalized_label == "apikey":
+            if normalized_label == "provider":
+                pending_provider = value.casefold()
+                pending_key = None
+            elif normalized_label == "apikey":
                 pending_key = value
             elif normalized_label == "url" and pending_key:
                 credential = ApiCredential(base_url=value.rstrip("/"), api_key=pending_key)
-                credentials[credential.host] = credential
+                binding = f"provider:{pending_provider}" if pending_provider else credential.host
+                credentials[binding] = credential
                 pending_key = None
+                pending_provider = None
         return credentials
+
+    @staticmethod
+    def for_provider(credentials: dict[str, ApiCredential], config: ProviderConfig) -> ApiCredential | None:
+        named = credentials.get(f"provider:{config.name.casefold()}")
+        return named or credentials.get(config.credential_host)
 
 
 class OpenAICompatibleProvider:

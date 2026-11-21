@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-from pathlib import Path
 
-from amadeus_bot.adapters.ai_provider import CredentialStore, OpenAICompatibleProvider
+from amadeus_bot.adapters.ai_provider import CredentialStore
 from amadeus_bot.adapters.gemini_provider import GeminiProvider
-from amadeus_bot.domain.ai import AITask
 from amadeus_bot.paths import AppPaths
 from amadeus_bot.services.ai_router import AIRouteCatalog
 
-PROBE_DIRECTORY = Path(__file__).resolve().parents[1] / "test-tmp" / "gemini-probe"
 
-
-async def main(image: bool) -> None:
+async def main() -> None:
     paths = AppPaths.discover()
     catalog = AIRouteCatalog.load(paths.ai_routes_file)
     config = catalog.providers["gemini"]
     credentials = CredentialStore.load(paths.api_key_file)
-    provider = GeminiProvider(config, credentials[config.credential_host])
+    credential = CredentialStore.for_provider(credentials, config)
+    if credential is None:
+        raise SystemExit("Gemini 凭据未匹配")
+    provider = GeminiProvider(config, credential)
 
     try:
         result = await provider.complete(
@@ -70,39 +68,9 @@ async def main(image: bool) -> None:
         )
         correct = "56088" in result.content.replace(",", "")
         print(f"tool replay nonempty={bool(result.content)} correct={correct}")
-        if image:
-            target = catalog.routes[AITask.IMAGE_GENERATION].primary
-            image_config = catalog.providers[target.provider]
-            image_provider = OpenAICompatibleProvider(
-                image_config, credentials[image_config.credential_host], timeout_seconds=180.0
-            )
-            try:
-                result = await image_provider.complete(
-                    model=target.model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": "Generate a small image of a red apple on white, no text.",
-                        }
-                    ],
-                    temperature=1.0,
-                    max_tokens=8192,
-                )
-            finally:
-                await image_provider.close()
-            print(f"image model={result.model} images={len(result.images)}")
-            if not result.images:
-                raise RuntimeError("Gateway did not return an image")
-            from amadeus_bot.services.image_generation import ImageGenerationService
-
-            service = ImageGenerationService(None, PROBE_DIRECTORY)
-            output = await asyncio.to_thread(service._save, result.images[0])
-            print(f"image saved={output}")
     finally:
         await provider.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image", action="store_true")
-    asyncio.run(main(parser.parse_args().image))
+    asyncio.run(main())

@@ -11,6 +11,7 @@ from nonebot.log import logger
 from amadeus_bot.adapters.ai_provider import (
     AIProviderRateLimited,
     ApiCredential,
+    CredentialStore,
     OpenAICompatibleProvider,
     ProviderConfig,
 )
@@ -38,7 +39,7 @@ class AIRouteCatalog:
         providers = {
             name: ProviderConfig(
                 name=name,
-                credential_host=str(values["credential_host"]),
+                credential_host=str(values.get("credential_host", "")),
                 api_prefix=str(values.get("api_prefix", "")),
                 api_mode=str(values.get("api_mode", "chat_completions")),
                 responses_stream=bool(values.get("responses_stream", False)),
@@ -58,7 +59,7 @@ class AIRouteCatalog:
                 temperature=float(values.get("temperature", 0.2)),
                 max_tokens=int(values.get("max_tokens", 1000)),
             )
-        missing = set(AITask) - routes.keys()
+        missing = set(AITask) - {AITask.IMAGE_GENERATION} - routes.keys()
         if missing:
             names = ", ".join(sorted(item.value for item in missing))
             raise ValueError(f"AI 路由缺少任务：{names}")
@@ -120,7 +121,7 @@ class AIService:
         self._model_lock = RLock()
         self.providers: dict[str, OpenAICompatibleProvider | GeminiProvider] = {}
         for name, provider_config in catalog.providers.items():
-            credential = credentials.get(provider_config.credential_host)
+            credential = CredentialStore.for_provider(credentials, provider_config)
             if credential is not None:
                 provider_class = (
                     GeminiProvider if provider_config.api_mode == "gemini" else OpenAICompatibleProvider
@@ -131,6 +132,7 @@ class AIService:
                     else provider_class(provider_config, credential)
                 )
         self._active_model = self._load_active_model()
+        self._last_chat_model: ModelTarget | None = None
 
     def available(self) -> bool:
         return bool(self.providers)
@@ -148,18 +150,27 @@ class AIService:
         with self._model_lock:
             return self._active_model
 
+    def chat_model_status(self) -> tuple[ModelTarget | None, ModelTarget]:
+        with self._model_lock:
+            return self._last_chat_model, self._active_model
+
+    def model_status(self, target: ModelTarget) -> str:
+        config = self.catalog.providers[target.provider]
+        if target.model in config.image_models or config.api_mode == "images":
+            return "仅生图"
+        if target.provider not in self.providers:
+            return "凭据未匹配"
+        return "可切换"
+
     def available_models(self) -> tuple[ModelTarget, ...]:
         return tuple(
-            target
-            for target in self.catalog.model_targets()
-            if target.provider in self.providers
-            and target.model not in self.catalog.providers[target.provider].image_models
+            target for target in self.catalog.model_targets() if self.model_status(target) == "可切换"
         )
 
     def switch_model(self, model_name: str, actor: str) -> ModelTarget:
         target = self.catalog.resolve_model(model_name)
-        if target.model in self.catalog.providers[target.provider].image_models:
-            raise ValueError("图像生成模型不能设为聊天主模型；请使用 /draw")
+        if self.model_status(target) == "仅生图":
+            raise ValueError("图像生成模型不能设为聊天主模型")
         if target.provider not in self.providers:
             raise ValueError(f"模型供应商未配置凭据：{target.provider}")
         self.repository.set_runtime_setting(
@@ -194,7 +205,9 @@ class AIService:
         quota = self.repository.ai_quota_for_task(task.value)
         if quota is not None and quota[1] >= quota[0]:
             raise AIQuotaExceeded(f"AI 任务 {task.value} 已达到当日调用上限 {quota[0]}")
-        route = self.catalog.routes[task]
+        route = self.catalog.routes.get(task)
+        if route is None:
+            raise AIInvocationError(f"AI 任务 {task.value} 不可用")
         errors: list[str] = []
         rate_limited = False
         targets = dict.fromkeys(
@@ -274,6 +287,9 @@ class AIService:
                 logger.info(
                     "AI 路由回退成功 task={} provider={} model={}", task.value, result.provider, result.model
                 )
+            if task is AITask.CHAT:
+                with self._model_lock:
+                    self._last_chat_model = ModelTarget(provider=target.provider, model=result.model)
             return result
         if rate_limited:
             raise AIProviderRateLimited("供应商当前配额已耗尽或限流：" + "; ".join(errors))

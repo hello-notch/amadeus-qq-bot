@@ -16,7 +16,8 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 class GeminiProvider:
     def __init__(self, config: ProviderConfig, credential: ApiCredential) -> None:
         self.config = config
-        self.api_base = credential.base_url.rstrip("/") + "/" + config.api_prefix.strip("/")
+        prefix = config.api_prefix.strip().strip("/")
+        self.api_base = credential.base_url.rstrip("/") + (f"/{prefix}" if prefix else "")
         self._client = httpx.AsyncClient(timeout=180.0, headers={"x-goog-api-key": credential.api_key})
 
     async def complete(

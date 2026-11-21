@@ -10,7 +10,8 @@
 - AI 长回复、群总结和统计分析的图片使用安全 Markdown 渲染，支持标题、加粗、列表与代码块；原始 HTML 和外链图片不可执行或加载。
 - 多供应商 AI 路由、按供应商选择 Chat Completions/Responses 协议、可持久化的 `/model` 模型切换、任务回退和 token/延迟统计。
 - 聊天默认使用配置网关中的 `gemini-3.8-flash-high`，通过 Gemini 原生接口支持识图及工具调用；群总结和统计继续使用各自的任务路由。
-- `/draw <画面描述>` 使用 `gpt-image-2.5` 生成一张图片；聊天中明确要求生成图片时，AI 可调用同一白名单工具。使用已配置网关的 `/v1/images/generations` 接口，会产生费用；供应商限流、无图片和损坏图片分别报告失败。群开关为 `image_generation`，生成结果保存在 `data/cache/generated/`。
+- `/draw` 保留命令入口，只回复 `draw不可用`，也不向聊天模型提供生图工具。
+- SUPERUSER 可用 `/model list` 查看 DeepSeek、Gemini、GPT 的本地配置模型及凭据状态，用 `/model switch <模型名或供应商/模型名>` 切换首选。`/model` 的“当前模型”是本次运行中最近一次成功响应聊天的实际模型，包含回退；首选独立显示并跨重启保存。
 - 每次启动清空旧 AI 聊天上下文，不删除系统角色、长期记忆或日志。首次连接后对每个群补拉最近 24 条消息，去重补入规范化日志并作为本次进程的聊天背景；连接重试不重复恢复成功补拉的群。补拉失败记录明确错误并继续接收新消息，不保证覆盖整个总结时间窗。
 - 所有新入站消息（包括群友之间的日常聊天、命令和非文字消息段）均在回复判定前进入对应会话上下文，不因关闭主动接话或聊天功能而漏收；隐私退出日志与 AI 忽略规则仍生效。正式聊天模型默认读取最近 24 条，会针对本轮指定消息回复，不执行其他人的背景请求。媒体不在旁听时自动调用视觉服务。
 - 决定回复并开始调用聊天模型时，给当前消息添加 ID `181` 的回应表情；文字或图片回复开始前移除，失败或取消时也尝试清理。不为候选筛选、未接话或排队等待添加表情；该状态不受普通贴表情功能开关控制。
@@ -36,7 +37,6 @@
 - `/nowdo`、`/food`、`/music` 分别从事项、食物、歌曲池随机推荐；各自支持 `list`（列名称与编号）、`add <名称> [图片]`（最多一张图片，保存添加者）、`del <名称>`（仅 SUPERUSER）。初始事项和食物选自旧 things.json，歌曲来自歌单 2718626529 的前十五首；启动幂等补种，不会删除用户条目。
 - 聊天可读取当前、被回复或同一发送者紧邻上一条的图片；文件正文仅支持 QQ HTTPS 链接提供的 UTF-8 文本、Markdown、CSV、JSON 和 ICS（最多 256 KiB，提交给模型时截取前 6000 字）。其他文件只显示名称，不声称已读内容。
 - AI 路由失败日志包含任务、供应商、模型、尝试序号、耗时、异常类型、HTTP 状态或超时阶段，以及是否继续回退；不记录敏感 URL、凭据或上游响应正文。读取超时只代表未及时拿到完整响应，不能直接判定供应商宕机。
-- 生图接口的 HTTP 等待超时为 300 秒（5 分钟），`/draw` 与 AI 生图工具共用此配置；其他模型超时不变。这是连接/读写各阶段的超时，不保证每次请求在五分钟内完成。
 
 ## 本地启动
 
@@ -68,7 +68,7 @@ uv run amadeus-bot
 
 帮助图片只使用与项目 Playwright 版本匹配的 Chromium，不会调用系统 Edge 或 Chrome。首次部署需要执行 `uv run playwright install chromium`。
 
-NapCat 的 OneBot V11 反向 WebSocket 地址应指向 NoneBot 配置的地址。各供应商 API key 默认从受保护且被 Git 忽略的 `secrets/apikey.txt` 读取；文件按 `apikey=...`、`url=...` 成对配置，可保存多组凭据。
+NapCat 的 OneBot V11 反向 WebSocket 地址应指向 NoneBot 配置的地址。各供应商 API key 默认从受保护且被 Git 忽略的 `secrets/apikey.txt` 读取。每组依次写 `provider=gemini`、`apikey=...`、`url=...`（一项一行），其他组使用 `provider=gpt` 或 `provider=deepseek`。同一协议换网关时只改该组的 key 和 URL，重启即可；同一域名可配置多组凭据。未命名的旧凭据仍按 `credential_host` 查找。只有网关协议或路径结构变了，才需要在 `config/ai_routes.toml` 调整 `api_mode`、`api_prefix` 等设置。默认 Gemini 使用 `generateContent`，GPT 使用流式 Responses，DeepSeek 使用 Chat Completions；`url` 不应重复包含会由 `api_prefix` 追加的路径。
 
 NapCat 是独立的第三方运行时，不随本仓库提交二进制文件。参照
 [`napcat/README.md`](napcat/README.md) 下载官方发行包并复制脱敏配置模板；Windows 下可在设置

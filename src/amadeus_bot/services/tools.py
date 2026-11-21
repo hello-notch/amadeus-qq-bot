@@ -93,7 +93,7 @@ class AIToolService:
         self.image_generation = image_generation
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [
+        schemas = [
             _function(
                 "group_card",
                 "修改当前群成员名片（不是全局昵称）；机器人须有群管理权限；普通成员可修改自己的名片，"
@@ -116,12 +116,6 @@ class AIToolService:
                     "duration": {"type": "integer", "minimum": 0, "maximum": 2592000},
                 },
                 ["target_user_id", "duration"],
-            ),
-            _function(
-                "image_generate",
-                "仅在用户明确要求画图或生成图片时调用 GPT Image 2.5，成功后直接发送图片；不要重复调用",
-                {"prompt": {"type": "string", "maxLength": 2000}},
-                ["prompt"],
             ),
             _function(
                 "help_lookup",
@@ -319,6 +313,16 @@ class AIToolService:
                 ["emoji_id"],
             ),
         ]
+        if self.image_generation is not None:
+            schemas.append(
+                _function(
+                    "image_generate",
+                    "仅在用户明确要求生成图片时调用，成功后直接发送图片；不要重复调用",
+                    {"prompt": {"type": "string", "maxLength": 2000}},
+                    ["prompt"],
+                )
+            )
+        return schemas
 
     async def execute(self, name: str, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
         if self.activity_log is not None:
@@ -377,11 +381,11 @@ class AIToolService:
                 )
                 return json.dumps(result, ensure_ascii=False)
             if name == "image_generate":
-                if not self._feature_enabled("image_generation", context):
-                    return _result(False, error="当前群已关闭图像生成")
+                if self.image_generation is None:
+                    return _result(False, error="draw不可用")
                 if context.group_id and self.repository.command_disabled(context.group_id, "draw"):
                     return _result(False, error="[draw]被关闭了~")
-                if self.image_generation is None or context.bot is None:
+                if context.bot is None:
                     return _result(False, error="图像生成服务或消息连接不可用")
                 path = await self.image_generation.generate(
                     str(arguments["prompt"]), context.requested_by, context.group_id

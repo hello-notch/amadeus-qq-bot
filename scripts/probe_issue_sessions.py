@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import time
 from pathlib import Path
 
@@ -11,7 +10,7 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main(image_only: bool = False, tool_only: bool = False) -> None:
+def main() -> None:
     with httpx.Client(base_url="http://127.0.0.1:18765", timeout=10.0) as client:
         for _ in range(90):
             if client.get("/api/state").json()["connected"]:
@@ -52,34 +51,8 @@ def main(image_only: bool = False, tool_only: bool = False) -> None:
             return row["scope"] == "private" and row["recipient_id"] == user
 
         regular, admin = 930000002, 930000001
-        if image_only or tool_only:
-
-            def image_predicate(row):
-                return any(part["type"] == "image" for part in row["segments"])
-
-            if not tool_only:
-                mid = send("group", admin, "/feature enable image_generation 920000000")
-                wait(mid, lambda row: "image_generation" in text(row), "image feature enabled")
-                mid = send("group", regular, "/draw 一颗红苹果，白色背景，不要文字。")
-                row = wait(mid, image_predicate, "GPT Image draw command")
-                file = next(part["data"]["file"] for part in row["segments"] if part["type"] == "image")
-                print(f"draw image={file}")
-                name = file.rsplit("/", 1)[-1]
-                media = client.get(f"/api/media/{name}")
-                assert media.status_code == 200 and media.headers["content-type"].startswith("image/")
-            mid = send(
-                "private",
-                regular,
-                "/chat 请使用image_generate工具生成一张绿色叶子的简单图片，白色背景，不要文字。",
-            )
-            row = wait(
-                mid, lambda row: private(row, regular) and image_predicate(row), "GPT Image delegated tool"
-            )
-            file = next(part["data"]["file"] for part in row["segments"] if part["type"] == "image")
-            print(f"tool image={file}")
-            return
         mid = send("private", admin, "/model switch gemini-3.8-flash-high")
-        wait(mid, lambda row: private(row, admin) and "已切换当前模型" in text(row), "Gemini selected")
+        wait(mid, lambda row: private(row, admin) and "已切换首选模型" in text(row), "Gemini selected")
         mid = send("group", regular, "/history clear")
         wait(mid, lambda row: "只能由 SUPERUSER" in text(row), "group clear rejected")
         mid = send("group", admin, "/history clear")
@@ -136,17 +109,11 @@ def main(image_only: bool = False, tool_only: bool = False) -> None:
         file = next(part["data"]["file"] for part in row["segments"] if part["type"] == "image")
         print(f"summary image={file}")
         mid = send("private", regular, "/draw")
-        wait(mid, lambda row: private(row, regular) and "1～2000" in text(row), "draw empty prompt")
-        mid = send("group", admin, "/feature disable image_generation 920000000")
-        wait(mid, lambda row: "image_generation" in text(row), "image feature disabled")
+        wait(mid, lambda row: private(row, regular) and text(row) == "draw不可用", "private draw disabled")
         mid = send("group", regular, "/draw apple")
-        wait(mid, lambda row: "关闭图像生成" in text(row), "draw feature rejection")
+        wait(mid, lambda row: text(row) == "draw不可用", "group draw disabled")
         print("Simulator issue sessions complete")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image-only", action="store_true")
-    parser.add_argument("--tool-only", action="store_true")
-    options = parser.parse_args()
-    main(options.image_only, options.tool_only)
+    main()

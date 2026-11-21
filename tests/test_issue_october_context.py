@@ -308,7 +308,7 @@ async def test_feature_reports_independent_command_restriction(tmp_path, monkeyp
     assert "实际开关：OFF" in global_enabled and "/enable chat" in global_enabled
 
 
-@pytest.mark.parametrize("task", [AITask.CHAT, AITask.IMAGE_GENERATION])
+@pytest.mark.parametrize("task", [AITask.CHAT, AITask.SUMMARY])
 async def test_ai_failure_logs_phase_model_elapsed_and_fallback_without_secrets(tmp_path, task):
     container = make_container(tmp_path)
     catalog = AIRouteCatalog.load(ROUTES_PATH)

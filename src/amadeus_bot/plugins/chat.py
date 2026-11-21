@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 from nonebot import get_driver, on_command, on_message
-from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+from nonebot.adapters.onebot.v11 import Bot, Message
 from nonebot.log import logger
 from nonebot.params import CommandArg
 from nonebot.rule import to_me
@@ -40,13 +40,10 @@ from amadeus_bot.services.tools import ToolExecutionContext
 command_registry.register(
     CommandSpec(
         name="draw",
-        description="使用 GPT Image 2.5 生成图片",
-        usage="/draw <画面描述>",
+        description="图像生成暂不可用",
+        usage="/draw",
         permission=PermissionLevel.EVERYONE,
-        feature="image_generation",
-        ai_callable=True,
-        examples=("/draw 一只坐在窗台上的猫，水彩风格",),
-        notes=("会产生真实模型调用费用；每次生成一张图片；全局同时只生成一张",),
+        ai_callable=False,
     )
 )
 command_registry.register(
@@ -121,27 +118,8 @@ async def handle_chat(bot: Bot, event, arguments: Message = CommandArg()) -> Non
 
 
 @draw_command.handle()
-async def handle_draw(event, arguments: Message = CommandArg()) -> None:
-    container = get_container()
-    group_id = event_group_id(event)
-    if group_id and not container.features.status("image_generation", group_id).enabled:
-        await draw_command.finish("当前群已关闭图像生成。")
-    try:
-        path = await container.image_generation.generate(
-            arguments.extract_plain_text(), event.get_user_id(), group_id
-        )
-    except Exception as exc:
-        await container.activity_log.record(
-            "image_generation",
-            f"图像生成失败：{type(exc).__name__}",
-            status="failed",
-            user_id=event.get_user_id(),
-            group_id=group_id,
-        )
-        await draw_command.finish(
-            f"图像生成失败：{exc}" if isinstance(exc, ValueError) else "图像生成服务暂不可用，请稍后重试。"
-        )
-    await draw_command.finish(MessageSegment.image(path.resolve().as_uri()))
+async def handle_draw() -> None:
+    await draw_command.finish("draw不可用")
 
 
 @history_command.handle()

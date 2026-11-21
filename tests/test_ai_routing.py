@@ -16,6 +16,7 @@ from amadeus_bot.adapters.ai_provider import (
 from amadeus_bot.domain.ai import AIResponse, AITask
 from amadeus_bot.repositories.core import CoreRepository
 from amadeus_bot.repositories.database import CoreDatabase
+from amadeus_bot.services.ai_errors import AIInvocationError
 from amadeus_bot.services.ai_router import AIRouteCatalog, AIService
 
 ROUTES_PATH = Path(__file__).resolve().parents[1] / "config" / "ai_routes.toml"
@@ -34,8 +35,10 @@ def test_route_catalog_assigns_cheap_and_quality_models() -> None:
         "deepseek-v4-pro",
         "deepseek-v4-flash-vision-exp",
     )
-    assert set(catalog.providers) == {"deepseek", "gemini", "images"}
-    assert catalog.routes[AITask.IMAGE_GENERATION].primary.model == "gpt-image-2.5"
+    assert set(catalog.providers) == {"deepseek", "gemini", "gpt"}
+    assert "gpt-5.6-sol" in catalog.providers["gpt"].models
+    assert catalog.providers["gpt"].api_prefix == "v1"
+    assert AITask.IMAGE_GENERATION not in catalog.routes
     assert catalog.providers["deepseek"].thinking_enabled is False
     assert catalog.routes[AITask.SUMMARY].max_tokens == 16384
     assert catalog.routes[AITask.STATS_ANALYSIS].max_tokens == 16384
@@ -68,6 +71,23 @@ def test_credential_store_parses_pairs_without_copying_file(tmp_path: Path) -> N
     credentials = CredentialStore.load(path)
     assert set(credentials) == {"one.example", "two.example"}
     assert credentials["one.example"].api_key == "test-key-one"
+
+
+def test_named_credentials_override_legacy_host_and_can_share_gateway(tmp_path: Path) -> None:
+    path = tmp_path / "apikey.txt"
+    catalog = AIRouteCatalog.load(ROUTES_PATH)
+    path.write_text(
+        "apikey=old-key\nurl=https://api.deepseek.com\n"
+        "provider=deepseek\napikey=new-key\nurl=https://shared.example/deepseek\n"
+        "provider=gemini\napikey=gemini-key\nurl=https://shared.example/gemini\n"
+        "provider=gpt\napikey=gpt-key\nurl=https://shared.example/gpt\n",
+        encoding="utf-8",
+    )
+    credentials = CredentialStore.load(path)
+    for name, key in (("deepseek", "new-key"), ("gemini", "gemini-key"), ("gpt", "gpt-key")):
+        assert CredentialStore.for_provider(credentials, catalog.providers[name]) == ApiCredential(
+            f"https://shared.example/{name}", key
+        )
 
 
 def test_parse_openai_tool_call() -> None:
@@ -291,6 +311,13 @@ async def test_ai_service_switches_and_persists_active_model(tmp_path: Path) -> 
     try:
         assert service.current_model().qualified_name == "gemini/gemini-3.8-flash-high"
         assert len(service.available_models()) == 3
+        assert {target.provider for target in service.catalog.model_targets()} == {
+            "deepseek",
+            "gemini",
+            "gpt",
+        }
+        with pytest.raises(ValueError, match="未配置凭据"):
+            service.switch_model("gpt/gpt-5.6-sol", "999")
         switched = service.switch_model("deepseek-v4-pro", "999")
         assert switched.qualified_name == "deepseek/deepseek-v4-pro"
     finally:
@@ -312,31 +339,31 @@ async def test_ai_service_switches_and_persists_active_model(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_image_route_sends_request_with_five_minute_timeout(tmp_path: Path) -> None:
+async def test_chat_can_use_each_named_provider_and_image_route_is_disabled(tmp_path: Path) -> None:
     catalog = AIRouteCatalog.load(ROUTES_PATH)
     database = CoreDatabase(tmp_path / "core.sqlite3")
     database.initialize()
     credentials = {
-        config.credential_host: ApiCredential(f"https://{config.credential_host}", "test-key")
-        for config in catalog.providers.values()
+        f"provider:{name}": ApiCredential(f"https://gateway.example/{name}", f"test-{name}")
+        for name in catalog.providers
     }
     service = AIService(catalog, credentials, CoreRepository(database))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/images/generations")
-        assert request.extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"), 300.0)
-        return httpx.Response(200, json={"data": [{"b64_json": "dGVzdA=="}]})
-
     try:
-        provider = service.providers["images"]
-        assert provider._client.timeout.read == 300.0
-        assert service.providers["gemini"]._client.timeout.read == 180.0
-        assert service.providers["deepseek"]._client.timeout.read == 45.0
-        timeout = provider._client.timeout
-        await provider._client.aclose()
-        provider._client = httpx.AsyncClient(timeout=timeout, transport=httpx.MockTransport(handler))
-        result = await service.complete(AITask.IMAGE_GENERATION, [{"role": "user", "content": "test image"}])
-        assert result.images == (b"test",)
+        assert service.chat_model_status() == (None, catalog.default_model)
+        assert service.available_models() == catalog.model_targets()
+        for name in ("gemini", "gpt", "deepseek"):
+            target = service.switch_model(f"{name}/{catalog.providers[name].models[0]}", "999")
+            provider = service.providers[name]
+            provider.complete = AsyncMock(
+                return_value=AIResponse(content="ok", provider=name, model=target.model)
+            )
+            result = await service.complete(AITask.CHAT, [{"role": "user", "content": "hello"}])
+            assert result.provider == name
+            provider.complete.assert_awaited_once()
+            assert service.chat_model_status() == (target, target)
+        with pytest.raises(AIInvocationError, match="image_generation 不可用"):
+            await service.complete(AITask.IMAGE_GENERATION, [])
     finally:
         await service.close()
 
@@ -361,11 +388,18 @@ async def test_ai_service_uses_active_model_before_task_fallback(tmp_path: Path)
     service.providers["deepseek"].complete = deepseek_complete
     try:
         result = await service.complete(AITask.CHAT, [{"role": "user", "content": "hello"}])
+        current, preferred = service.chat_model_status()
+        assert current is not None and current.qualified_name == "deepseek/deepseek-v4-flash"
+        assert preferred.qualified_name == "deepseek/deepseek-v4-pro"
+        deepseek_complete.side_effect = None
+        deepseek_complete.return_value = AIResponse(content="summary", provider="deepseek", model="summary")
+        await service.complete(AITask.SUMMARY, [])
+        assert service.chat_model_status() == (current, preferred)
     finally:
         await service.close()
 
     assert result.provider == "deepseek"
-    assert [call.kwargs["model"] for call in deepseek_complete.await_args_list] == [
+    assert [call.kwargs["model"] for call in deepseek_complete.await_args_list[:2]] == [
         "deepseek-v4-pro",
         "deepseek-v4-flash",
     ]

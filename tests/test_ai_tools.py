@@ -187,6 +187,14 @@ async def test_group_admin_tool_member_can_only_modify_self(tmp_path, tool, argu
     assert bot.calls == []
 
 
+async def test_image_tool_is_not_exposed_without_service(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    assert "image_generate" not in {schema["function"]["name"] for schema in tools.schemas()}
+    context = ToolExecutionContext.for_requester("100", "1")
+    result = json.loads(await tools.execute("image_generate", {"prompt": "test"}, context))
+    assert result == {"success": False, "error": "draw不可用"}
+
+
 async def test_image_tool_clears_thinking_before_sending_output(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     timeline = []
